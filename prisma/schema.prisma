@@ -1,0 +1,194 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+// Este serviço é o único dono do schema Postgres "orders" no banco Supabase
+// compartilhado. Nenhuma outra tabela do marketplace vive aqui, e este schema
+// não referencia tabelas de outros serviços por FK — customerId (Order) e
+// sellerId/productId/variantId (SellerOrder/OrderItem) são referências
+// soltas (UUID), nunca FK cross-schema. customerId é resolvido por
+// SessionAuthGuard (rede, identity-service); productId/variantId/sellerId e
+// os preços de cada linha são resolvidos e validados por
+// CatalogServiceClient (rede, catalog-service) ANTES de qualquer linha ser
+// gravada — ver docs/internal-api-contract.md.
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+  schemas   = ["orders"]
+}
+
+// ---------------------------------------------------------------------------
+// Pedidos (checkout multi-vendedor)
+// Nomes físicos em português via @map / @@map, como no monólito de origem.
+// Modelos portados fielmente do schema.prisma do monólito
+// (marketing-place-potala-backend-main) — o monólito já tinha o MODELO de
+// dados pronto e revisado; o que não existia em lugar nenhum do sistema era
+// o CÓDIGO de checkout (carrinho, cobrança, webhook) — ver README.md para o
+// que este serviço decide e o que fica deliberadamente fora da v1.
+// ---------------------------------------------------------------------------
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  CANCELLED
+  FULFILLING
+  COMPLETED
+
+  @@schema("orders")
+}
+
+enum SellerOrderStatus {
+  PENDING
+  CONFIRMED
+  PREPARING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+
+  @@schema("orders")
+}
+
+enum PaymentTransactionStatus {
+  PENDING
+  APPROVED
+  FAILED
+  CANCELLED
+
+  @@schema("orders")
+}
+
+model Order {
+  id            String      @id @default(uuid()) @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios — sem FK cross-schema.
+  /// Resolvido por SessionAuthGuard (rede, identity-service), nunca entrada
+  /// bruta de cliente.
+  customerId    String      @map("cliente_id") @db.Uuid
+  orderNumber   String      @unique @map("numero_pedido")
+  status        OrderStatus @default(PENDING_PAYMENT)
+  /// Money CHECKs: each money column >= 0. No formula tying total to subtotal+shipping-discount
+  /// (future taxes/credits/adjustments must remain possible).
+  subtotalCents Int         @map("subtotal_centavos")
+  /// v1 não calcula frete — sempre 0. Ver README.md.
+  shippingCents Int         @default(0) @map("frete_centavos")
+  discountCents Int         @default(0) @map("desconto_centavos")
+  totalCents    Int         @map("total_centavos")
+  createdAt     DateTime    @default(now()) @map("criado_em")
+  updatedAt     DateTime    @updatedAt @map("atualizado_em")
+
+  shippingAddress     OrderShippingAddress?
+  sellerOrders        SellerOrder[]
+  paymentTransactions PaymentTransaction[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("pedidos")
+  @@schema("orders")
+}
+
+/// Snapshot of the delivery address at checkout time. Independent of any address book.
+model OrderShippingAddress {
+  id           String  @id @default(uuid()) @db.Uuid
+  orderId      String  @unique @map("pedido_id") @db.Uuid
+  recipient    String  @map("destinatario")
+  street       String  @map("logradouro")
+  number       String  @map("numero")
+  complement   String? @map("complemento")
+  neighborhood String  @map("bairro")
+  city         String  @map("cidade")
+  state        String  @map("estado")
+  postalCode   String  @map("cep")
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("enderecos_entrega_pedido")
+  @@schema("orders")
+}
+
+model SellerOrder {
+  id              String            @id @default(uuid()) @db.Uuid
+  orderId         String            @map("pedido_id") @db.Uuid
+  /// Referência solta (UUID) a sellers.vendedores — sem FK cross-schema.
+  /// Resolvido por CatalogServiceClient.resolveProductVariants (rede,
+  /// catalog-service, que por sua vez é o dono autoritativo de
+  /// Product.sellerId) — nunca entrada bruta de cliente.
+  sellerId        String            @map("vendedor_id") @db.Uuid
+  status          SellerOrderStatus @default(PENDING)
+  /// Money CHECKs: each column >= 0. No rigid sellerNet = subtotal + shipping - commission.
+  subtotalCents   Int               @map("subtotal_centavos")
+  /// v1 não calcula frete nem comissão — sempre 0. Ver README.md.
+  shippingCents   Int               @default(0) @map("frete_centavos")
+  commissionCents Int               @default(0) @map("comissao_centavos")
+  sellerNetCents  Int               @default(0) @map("liquido_vendedor_centavos")
+  createdAt       DateTime          @default(now()) @map("criado_em")
+  updatedAt       DateTime          @updatedAt @map("atualizado_em")
+
+  order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items OrderItem[]
+
+  @@unique([orderId, sellerId])
+  @@index([orderId])
+  @@index([sellerId])
+  @@index([status])
+  @@map("pedidos_vendedor")
+  @@schema("orders")
+}
+
+model OrderItem {
+  id             String  @id @default(uuid()) @db.Uuid
+  sellerOrderId  String  @map("pedido_vendedor_id") @db.Uuid
+  /// Referências soltas (UUID) a catalog.produtos / catalog.variantes_produto
+  /// — sem FK cross-schema. Ambas vêm de
+  /// CatalogServiceClient.resolveProductVariants, nunca de entrada bruta de
+  /// cliente (o cliente manda productId/variantId candidatos; o que fica
+  /// gravado aqui é sempre o que catalog-service confirmou).
+  productId      String  @map("produto_id") @db.Uuid
+  variantId      String  @map("variante_id") @db.Uuid
+  productTitle   String  @map("titulo_produto")
+  sku            String
+  /// Snapshot CHECKs: quantidade > 0, money >= 0. No formula lineTotal = qty * unitPrice
+  /// (enforced in application code at write time; not re-derived by the database).
+  quantity       Int     @map("quantidade")
+  unitPriceCents Int     @map("preco_unitario_centavos")
+  lineTotalCents Int     @map("total_linha_centavos")
+
+  sellerOrder SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+
+  @@index([sellerOrderId])
+  @@index([productId])
+  @@map("itens_pedido")
+  @@schema("orders")
+}
+
+/// Charge attempts only (PENDING / APPROVED / FAILED / CANCELLED). Never store PAN/CVV.
+/// amountCents CHECK: valor_centavos > 0. Refunds must not use negative amounts; add a type
+/// discriminator first (this model has no CHARGE vs REFUND).
+/// Idempotency: @@unique([provider, providerRef]). PostgreSQL treats NULL providerRef as distinct,
+/// so many (provider, NULL) rows are allowed; a second (provider, same-ref) is rejected.
+/// Empty/whitespace-only provider and providerRef are forbidden (CHECK + BTRIM). Values are not
+/// trimmed in the database; the application/gateway normalizes provider.
+/// If providerRef is set, provider is required (CHECK).
+///
+/// v1 only ever writes provider = "mock" (MockPaymentGatewayAdapter — see
+/// modules/payments). The column stays provider-agnostic on purpose so a
+/// real gateway adapter can be swapped in later without a schema change.
+model PaymentTransaction {
+  id          String                   @id @default(uuid()) @db.Uuid
+  orderId     String                   @map("pedido_id") @db.Uuid
+  status      PaymentTransactionStatus @default(PENDING)
+  amountCents Int                      @map("valor_centavos")
+  provider    String?                  @map("provedor")
+  providerRef String?                  @map("referencia_provedor")
+  createdAt   DateTime                 @default(now()) @map("criado_em")
+  updatedAt   DateTime                 @updatedAt @map("atualizado_em")
+
+  order Order @relation(fields: [orderId], references: [id])
+
+  @@unique([provider, providerRef], map: "transacoes_pagamento_provedor_referencia_provedor_key")
+  @@index([orderId])
+  @@index([status])
+  @@map("transacoes_pagamento")
+  @@schema("orders")
+}
