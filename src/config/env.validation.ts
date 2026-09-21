@@ -205,6 +205,12 @@ export function validateEnv(env: Record<string, unknown>): AppConfig {
   );
   const catalogServiceApiKey = required(env, 'CATALOG_SERVICE_API_KEY');
 
+  const sellersServiceUrl = readRequiredServiceOrigin(
+    env,
+    'SELLERS_SERVICE_URL',
+  );
+  const sellersServiceApiKey = required(env, 'SELLERS_SERVICE_API_KEY');
+
   return {
     nodeEnv,
     port: optionalInteger(env, 'PORT', 3004, PORT_MIN, PORT_MAX),
@@ -248,6 +254,17 @@ export function validateEnv(env: Record<string, unknown>): AppConfig {
       timeoutMs: optionalInteger(
         env,
         'CATALOG_SERVICE_TIMEOUT_MS',
+        5000,
+        100,
+        60_000,
+      ),
+    },
+    sellersService: {
+      baseUrl: sellersServiceUrl,
+      apiKey: sellersServiceApiKey,
+      timeoutMs: optionalInteger(
+        env,
+        'SELLERS_SERVICE_TIMEOUT_MS',
         5000,
         100,
         60_000,

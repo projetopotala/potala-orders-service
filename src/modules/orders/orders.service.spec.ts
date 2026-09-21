@@ -464,4 +464,53 @@ describe('OrdersService', () => {
       );
     });
   });
+
+  describe('listForSeller', () => {
+    it('scopes the query to the requesting seller, not the whole order', async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findMany.mockResolvedValue([]);
+
+      await service.listForSeller(SELLER_A);
+
+      expect(prisma.sellerOrder.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { sellerId: SELLER_A } }),
+      );
+    });
+
+    it('rejects a cursor belonging to another store as if it did not exist', async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.listForSeller(SELLER_A, { cursor: 'seller-order-of-someone-else' }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    });
+  });
+
+  describe('getForSeller', () => {
+    it('returns 404 (never 403) for another store’s SellerOrder', async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.getForSeller(SELLER_A, 'someone-elses-seller-order'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('scopes the lookup to the requesting store in SQL, not after the fact', async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue({
+        id: 'seller-order-1',
+        sellerId: SELLER_A,
+      });
+
+      await service.getForSeller(SELLER_A, 'seller-order-1');
+
+      expect(prisma.sellerOrder.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'seller-order-1', sellerId: SELLER_A },
+        }),
+      );
+    });
+  });
 });

@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { CatalogServiceClient } from './catalog-service.client';
 import { IdentityServiceClient } from './identity-service.client';
+import { SellersServiceClient } from './sellers-service.client';
 
 /**
  * Global, like PrismaModule: both clients are needed app-wide (SessionAuthGuard
@@ -10,7 +11,7 @@ import { IdentityServiceClient } from './identity-service.client';
  */
 @Global()
 @Module({
-  providers: [IdentityServiceClient, CatalogServiceClient],
-  exports: [IdentityServiceClient, CatalogServiceClient],
+  providers: [IdentityServiceClient, CatalogServiceClient, SellersServiceClient],
+  exports: [IdentityServiceClient, CatalogServiceClient, SellersServiceClient],
 })
 export class ClientsModule {}

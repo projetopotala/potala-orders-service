@@ -121,6 +121,73 @@ export class OrdersService {
     return order;
   }
 
+  /**
+   * Read-only seller view of orders (see status doc): the authenticated
+   * store's own SellerOrder rows, newest first. Scoped to SellerOrder, not
+   * Order — a seller only ever sees the slice of a (possibly multi-seller)
+   * order that belongs to their own store, never another seller's items or
+   * totals on the same order. Same tenant-scoped-cursor reasoning as
+   * listForCustomer above.
+   */
+  async listForSeller(sellerId: string, query: PaginationQueryDto = {}) {
+    const { limit, cursor } = resolvePagination(query);
+
+    await requireCursor(cursor, async (id) => {
+      const sellerOrder = await this.prisma.sellerOrder.findFirst({
+        where: { id, sellerId },
+        select: { id: true },
+      });
+      return sellerOrder !== null;
+    });
+
+    const rows = await this.prisma.sellerOrder.findMany({
+      ...prismaIdCursorArgs(limit, cursor),
+      where: { sellerId },
+      include: {
+        items: true,
+        order: {
+          select: {
+            orderNumber: true,
+            status: true,
+            createdAt: true,
+            shippingAddress: true,
+          },
+        },
+      },
+      orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
+    });
+
+    return buildPage(rows, limit);
+  }
+
+  /**
+   * Tenant-scoped in SQL on purpose, same indistinguishable-404 reasoning as
+   * getForCustomer above: a SellerOrder belonging to another store must 404,
+   * not 403.
+   */
+  async getForSeller(sellerId: string, sellerOrderId: string) {
+    const sellerOrder = await this.prisma.sellerOrder.findFirst({
+      where: { id: sellerOrderId, sellerId },
+      include: {
+        items: true,
+        order: {
+          select: {
+            orderNumber: true,
+            status: true,
+            createdAt: true,
+            shippingAddress: true,
+          },
+        },
+      },
+    });
+
+    if (!sellerOrder) {
+      throw new NotFoundException('Seller order not found');
+    }
+
+    return sellerOrder;
+  }
+
   async checkout(customerId: string, dto: CreateCheckoutDto) {
     const validatedItems = await this.resolveAndValidateItems(dto.items);
     const sellerGroups = this.groupBySeller(validatedItems);

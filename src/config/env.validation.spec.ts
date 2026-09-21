@@ -9,6 +9,8 @@ const baseEnv = {
   IDENTITY_SERVICE_API_KEY: 'test-identity-service-api-key-not-a-real-secret',
   CATALOG_SERVICE_URL: 'http://localhost:3003',
   CATALOG_SERVICE_API_KEY: 'test-catalog-service-api-key-not-a-real-secret',
+  SELLERS_SERVICE_URL: 'http://localhost:3002',
+  SELLERS_SERVICE_API_KEY: 'test-sellers-service-api-key-not-a-real-secret',
 };
 
 describe('validateEnv', () => {
@@ -34,6 +36,11 @@ describe('validateEnv', () => {
         apiKey: baseEnv.CATALOG_SERVICE_API_KEY,
         timeoutMs: 5000,
       },
+      sellersService: {
+        baseUrl: baseEnv.SELLERS_SERVICE_URL,
+        apiKey: baseEnv.SELLERS_SERVICE_API_KEY,
+        timeoutMs: 5000,
+      },
     });
   });
 
@@ -49,12 +56,14 @@ describe('validateEnv', () => {
       THROTTLE_LIMIT: '60',
       IDENTITY_SERVICE_TIMEOUT_MS: '5000',
       CATALOG_SERVICE_TIMEOUT_MS: '5000',
+      SELLERS_SERVICE_TIMEOUT_MS: '5000',
     });
 
     expect(config.nodeEnv).toBe('development');
     expect(config.session.cookieName).toBe('potala_session');
     expect(config.identityService.timeoutMs).toBe(5000);
     expect(config.catalogService.timeoutMs).toBe(5000);
+    expect(config.sellersService.timeoutMs).toBe(5000);
   });
 
   it('never enables HTTP body logging in production', () => {
@@ -143,6 +152,32 @@ describe('validateEnv', () => {
       expect(() =>
         validateEnv({ ...baseEnv, CATALOG_SERVICE_URL: 'ftp://localhost' }),
       ).toThrow(/CATALOG_SERVICE_URL/);
+    });
+  });
+
+  describe('SELLERS_SERVICE_URL / SELLERS_SERVICE_API_KEY', () => {
+    it('requires the URL (the seller-orders endpoints cannot resolve a sellerId without it)', () => {
+      const { SELLERS_SERVICE_URL: _omitted, ...withoutUrl } = baseEnv;
+      expect(() => validateEnv(withoutUrl)).toThrow(/SELLERS_SERVICE_URL/);
+    });
+
+    it('requires the API key', () => {
+      const { SELLERS_SERVICE_API_KEY: _omitted, ...withoutKey } = baseEnv;
+      expect(() => validateEnv(withoutKey)).toThrow(/SELLERS_SERVICE_API_KEY/);
+    });
+
+    it('strips a trailing slash from the configured URL', () => {
+      const config = validateEnv({
+        ...baseEnv,
+        SELLERS_SERVICE_URL: 'http://localhost:3002/',
+      });
+      expect(config.sellersService.baseUrl).toBe('http://localhost:3002');
+    });
+
+    it('rejects a non-http(s) URL', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv, SELLERS_SERVICE_URL: 'ftp://localhost' }),
+      ).toThrow(/SELLERS_SERVICE_URL/);
     });
   });
 

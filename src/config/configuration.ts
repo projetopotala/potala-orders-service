@@ -40,6 +40,18 @@ export interface AppConfig {
     apiKey: string;
     timeoutMs: number;
   };
+  /**
+   * Needed only by the seller-orders read endpoints (GET /seller/orders,
+   * GET /seller/orders/:id) — resolving which sellerId the authenticated
+   * user acts as means calling sellers-service's own
+   * GET /internal/sellers/membership/:userId, since this service has no
+   * local membership table either.
+   */
+  sellersService: {
+    baseUrl: string;
+    apiKey: string;
+    timeoutMs: number;
+  };
 }
 
 export const APP_CONFIG = 'APP_CONFIG';

@@ -25,10 +25,11 @@ import { Role } from '../../common/types/identity-enums';
 
 /**
  * Every route here is customer-only (Role.CUSTOMER) — there is no seller or
- * admin view of orders in this v1 (sellers see their own SellerOrder rows
- * through a future endpoint, not this controller). SessionAuthGuard and
- * RolesGuard are both registered as APP_GUARD in app.module.ts, so neither
- * guard is repeated here.
+ * admin view of orders in this controller. Sellers see their own
+ * (read-only) SellerOrder rows through SellerOrdersController instead — see
+ * seller-orders.controller.ts. SessionAuthGuard and RolesGuard are both
+ * registered as APP_GUARD in app.module.ts, so neither guard is repeated
+ * here.
  */
 @ApiTags('orders')
 @ApiBearerAuth()
