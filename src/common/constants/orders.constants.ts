@@ -30,3 +30,8 @@ export const MAX_SHIPPING_POSTAL_CODE_LENGTH = 20;
 
 /** Whole-transaction retries when another request took the order number between generation and insert. */
 export const MAX_ORDER_NUMBER_RETRIES = 3;
+
+// --- Reviews (Fase B do roadmap pos-entrega, ver roadmap-mercado-livre.md) ---
+export const MIN_REVIEW_RATING = 1;
+export const MAX_REVIEW_RATING = 5;
+export const MAX_REVIEW_COMMENT_LENGTH = 2000;

@@ -155,6 +155,7 @@ model OrderItem {
   lineTotalCents Int     @map("total_linha_centavos")
 
   sellerOrder SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+  review      Review?
 
   @@index([sellerOrderId])
   @@index([productId])
@@ -190,5 +191,41 @@ model PaymentTransaction {
   @@index([orderId])
   @@index([status])
   @@map("transacoes_pagamento")
+  @@schema("orders")
+}
+
+/// Fase B do roadmap pos-entrega (ver roadmap-mercado-livre.md, secao 6) --
+/// avaliacao e reputacao. Uma avaliacao por item comprado, garantido pelo
+/// @unique em orderItemId no proprio banco, nao so na aplicacao -- mesmo
+/// estilo de integridade que PaymentTransaction.@@unique([provider,
+/// providerRef]) acima. customerId/sellerId/productId sao snapshot no
+/// momento da avaliacao, nunca FK cross-schema -- mesmo raciocinio de
+/// OrderItem.productTitle/sku (linhas acima): sellerId vem de
+/// SellerOrder.sellerId, productId vem de OrderItem.productId, ambos ja
+/// resolvidos e validados por CatalogServiceClient no checkout, nunca
+/// entrada bruta de cliente nesta escrita.
+/// rating CHECK (1..5): adicionado a mao na migration em SQL cru, mesmo
+/// padrao de todo CHECK numerico deste schema -- ver README.md.
+model Review {
+  id          String   @id @default(uuid()) @db.Uuid
+  orderItemId String   @unique @map("item_pedido_id") @db.Uuid
+  /// Referencia solta (UUID) a identity.usuarios -- quem comprou. Resolvido
+  /// da sessao (SessionAuthGuard), nunca do corpo da requisicao.
+  customerId  String   @map("cliente_id") @db.Uuid
+  /// Snapshot de SellerOrder.sellerId no momento da avaliacao -- alimenta o
+  /// agregado de reputacao do vendedor sem chamada cross-service.
+  sellerId    String   @map("vendedor_id") @db.Uuid
+  /// Snapshot de OrderItem.productId -- alimenta o agregado de nota do
+  /// produto sem chamada cross-service.
+  productId   String   @map("produto_id") @db.Uuid
+  rating      Int      @map("nota")
+  comment     String?  @map("comentario")
+  createdAt   DateTime @default(now()) @map("criado_em")
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([sellerId])
+  @@map("avaliacoes")
   @@schema("orders")
 }

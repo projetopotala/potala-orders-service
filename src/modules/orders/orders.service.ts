@@ -118,7 +118,12 @@ export class OrdersService {
       where: { id: orderId, customerId },
       include: {
         shippingAddress: true,
-        sellerOrders: { include: { items: true } },
+        // items.review incluído aqui (não em listForCustomer, mesma
+        // assimetria já documentada acima entre list/get) -- Fase B do
+        // roadmap pós-entrega: o frontend usa isso pra saber se já existe
+        // avaliação de um item antes de mostrar o formulário em "Meus
+        // Pedidos", sem precisar de uma chamada separada.
+        sellerOrders: { include: { items: { include: { review: true } } } },
         paymentTransactions: true,
       },
     });

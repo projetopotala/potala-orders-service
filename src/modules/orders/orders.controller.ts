@@ -16,7 +16,9 @@ import {
   ApiTags,
 } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
+import { ReviewsService } from './reviews.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
+import { CreateReviewDto } from './dto/create-review.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -36,7 +38,10 @@ import { Role } from '../../common/types/identity-enums';
 @Controller('orders')
 @Roles(Role.CUSTOMER)
 export class OrdersController {
-  constructor(private readonly ordersService: OrdersService) {}
+  constructor(
+    private readonly ordersService: OrdersService,
+    private readonly reviewsService: ReviewsService,
+  ) {}
 
   @Post('checkout')
   @ApiOperation({
@@ -89,5 +94,31 @@ export class OrdersController {
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
   ) {
     return this.ordersService.getForCustomer(user.id, id);
+  }
+
+  @Post(':orderId/items/:itemId/review')
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiParam({ name: 'itemId', format: 'uuid' })
+  @ApiOperation({
+    summary:
+      "Reviews one of the authenticated customer's own order items — one review per item, only after the seller has confirmed the order.",
+  })
+  @ApiResponse({ status: HttpStatus.CREATED, description: 'Review created.' })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      "Order item does not exist, or does not belong to the caller's order (never distinguished from the caller's perspective).",
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'Seller order is not yet CONFIRMED, or this item was already reviewed.',
+  })
+  async createReview(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('orderId', new ParseUUIDPipe({ version: '4' })) orderId: string,
+    @Param('itemId', new ParseUUIDPipe({ version: '4' })) itemId: string,
+    @Body() dto: CreateReviewDto,
+  ) {
+    return this.reviewsService.createReview(user.id, orderId, itemId, dto);
   }
 }
