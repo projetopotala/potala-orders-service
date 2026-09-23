@@ -91,7 +91,16 @@ export class OrdersService {
     const rows = await this.prisma.order.findMany({
       ...prismaIdCursorArgs(limit, cursor),
       where: { customerId },
-      include: { sellerOrders: true },
+      // Mesmo include de getForCustomer abaixo -- a listagem precisa do
+      // mesmo shape que o detalhe, ou o frontend (que usa um unico tipo
+      // OrderResponse pros dois) quebra ao tentar ler um campo que so o
+      // detalhe trazia (bug real encontrado nesta sessao: sellerOrders[].
+      // items vinha undefined aqui, derrubando a tela "Meus Pedidos").
+      include: {
+        shippingAddress: true,
+        sellerOrders: { include: { items: true } },
+        paymentTransactions: true,
+      },
       orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
     });
 
