@@ -20,6 +20,8 @@ import {
   PAYMENT_GATEWAY_CLIENT,
   PaymentChargeResult,
   PaymentGatewayClient,
+  PaymentSplitRecipient,
+  PaymentWebhookEvent,
 } from '../payments/payment-gateway.interface';
 import { ProductStatus, ResolvedProductVariant } from '../../common/types/catalog-types';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
@@ -202,6 +204,46 @@ export class OrdersService {
     return sellerOrder;
   }
 
+  /**
+   * Admin, marketplace-wide: every SellerOrder row, across every store, not
+   * just one seller's own. Same shape as listForSeller above (SellerOrder é
+   * a unidade financeira por vendedor, mesmo padrão de granularidade), só
+   * sem o `where: { sellerId }` -- quem chama já passou por
+   * `@Roles(Role.ADMIN)` no controller, não há escopo de tenant aqui por
+   * design. `sellerId` vem em cada linha; o admin panel resolve nome de
+   * loja separadamente via GET /admin/sellers (sellers-service) -- não há
+   * FK cross-schema pra fazer esse join aqui.
+   */
+  async listForAdmin(query: PaginationQueryDto = {}) {
+    const { limit, cursor } = resolvePagination(query);
+
+    await requireCursor(cursor, async (id) => {
+      const sellerOrder = await this.prisma.sellerOrder.findFirst({
+        where: { id },
+        select: { id: true },
+      });
+      return sellerOrder !== null;
+    });
+
+    const rows = await this.prisma.sellerOrder.findMany({
+      ...prismaIdCursorArgs(limit, cursor),
+      include: {
+        items: true,
+        order: {
+          select: {
+            orderNumber: true,
+            status: true,
+            createdAt: true,
+            shippingAddress: true,
+          },
+        },
+      },
+      orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
+    });
+
+    return buildPage(rows, limit);
+  }
+
   async checkout(customerId: string, dto: CreateCheckoutDto) {
     const validatedItems = await this.resolveAndValidateItems(dto.items);
     const sellerGroups = this.groupBySeller(validatedItems);
@@ -243,12 +285,24 @@ export class OrdersService {
       },
     });
 
+    // Um split por vendedor do pedido -- best-effort hoje (nenhum gateway
+    // foi escolhido ainda, ver roadmap-mercado-livre.md secao 9), mas ja
+    // fica computado e disponivel pro dia em que o adapter real precisar
+    // dele. sellerGroups.subtotalCents ainda nao inclui comissao/frete por
+    // vendedor (sempre 0 no v1 -- ver README.md), entao splits[].amountCents
+    // == subtotalCents por enquanto.
+    const splits: PaymentSplitRecipient[] = sellerGroups.map((group) => ({
+      sellerId: group.sellerId,
+      amountCents: group.subtotalCents,
+    }));
+
     let chargeResult: PaymentChargeResult;
     try {
       chargeResult = await this.paymentGateway.charge({
         orderId: order.id,
         orderNumber: order.orderNumber,
         amountCents: totalCents,
+        splits,
       });
     } catch (error) {
       this.logger.error(
@@ -267,16 +321,96 @@ export class OrdersService {
         chargeResult,
         inventoryItems,
       );
-    } else {
+    } else if (chargeResult.status === 'FAILED') {
       await this.finalizeFailedPayment(
         order.id,
         paymentTransaction.id,
         inventoryItems,
         chargeResult,
       );
+    } else {
+      // PENDING -- gateway aceitou a cobranca mas ainda nao confirmou
+      // (tipico de Pix/boleto). Nada a fazer aqui: Order ja nasce
+      // PENDING_PAYMENT e PaymentTransaction ja nasce PENDING (ver criacao
+      // acima), e o estoque fica reservado (nem commit nem release) ate a
+      // confirmacao chegar via webhook -- ver confirmPaymentFromWebhook.
+      this.logger.log(
+        `Order ${order.orderNumber} awaiting async payment confirmation (provider=${chargeResult.provider}, providerRef=${chargeResult.providerRef}).`,
+      );
     }
 
     return this.getForCustomer(customerId, order.id);
+  }
+
+  /**
+   * Contraparte assincrona do fluxo acima -- chamada por
+   * PaymentWebhooksController quando o gateway real confirma (ou rejeita)
+   * um pagamento que tinha ficado PENDING no checkout. Idempotente: um
+   * webhook duplicado (reentrega, retry do provedor) em cima de uma
+   * PaymentTransaction que ja saiu de PENDING e um webhook pra uma
+   * providerRef desconhecida sao ambos no-op, nunca erro 500 -- provedores
+   * de webhook tratam qualquer resposta != 2xx como "tentar de novo", e
+   * nao ha nada a reconciliar reprocessando um evento ja aplicado.
+   */
+  async confirmPaymentFromWebhook(event: PaymentWebhookEvent): Promise<void> {
+    const paymentTransaction = await this.prisma.paymentTransaction.findUnique({
+      where: {
+        provider_providerRef: {
+          provider: event.provider,
+          providerRef: event.providerRef,
+        },
+      },
+    });
+
+    if (!paymentTransaction) {
+      this.logger.warn(
+        `Webhook for unknown transaction (provider=${event.provider}, providerRef=${event.providerRef}) -- ignored.`,
+      );
+      return;
+    }
+
+    if (paymentTransaction.status !== PaymentTransactionStatus.PENDING) {
+      this.logger.log(
+        `Webhook for transaction ${paymentTransaction.id} ignored -- already ${paymentTransaction.status} (duplicate delivery).`,
+      );
+      return;
+    }
+
+    const inventoryItems = await this.getInventoryItemsForOrder(paymentTransaction.orderId);
+    const chargeResult: PaymentChargeResult = {
+      status: event.status,
+      provider: event.provider,
+      providerRef: event.providerRef,
+    };
+
+    if (event.status === 'APPROVED') {
+      await this.finalizeApprovedPayment(
+        paymentTransaction.orderId,
+        paymentTransaction.id,
+        chargeResult,
+        inventoryItems,
+      );
+    } else {
+      await this.finalizeFailedPayment(
+        paymentTransaction.orderId,
+        paymentTransaction.id,
+        inventoryItems,
+        chargeResult,
+      );
+    }
+  }
+
+  /** Reconstroi InventoryItemInput[] a partir do pedido ja gravado -- usado por confirmPaymentFromWebhook, que nao tem o carrinho original em mao (so o orderId veio do webhook). */
+  private async getInventoryItemsForOrder(orderId: string): Promise<InventoryItemInput[]> {
+    const items = await this.prisma.orderItem.findMany({
+      where: { sellerOrder: { orderId } },
+      select: { variantId: true, quantity: true },
+    });
+
+    return items.map((item) => ({
+      variantId: item.variantId,
+      quantity: item.quantity,
+    }));
   }
 
   /**

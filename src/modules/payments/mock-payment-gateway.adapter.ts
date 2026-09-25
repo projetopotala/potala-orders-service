@@ -4,6 +4,7 @@ import {
   PaymentChargeInput,
   PaymentChargeResult,
   PaymentGatewayClient,
+  PaymentWebhookEvent,
 } from './payment-gateway.interface';
 
 /**
@@ -14,7 +15,8 @@ import {
  * release) without blocking on a provider decision that is Arthur's to make,
  * not Claude's to assume.
  *
- * Deliberately always approves. The failure path (release stock, cancel the
+ * Deliberately always approves, synchronously — never returns PENDING, so
+ * it never needs a webhook. The failure path (release stock, cancel the
  * order) is fully implemented in OrdersService and exercised in
  * orders.service.spec.ts by injecting a fake PaymentGatewayClient that
  * returns FAILED — not by a client-supplied "simulate failure" flag on the
@@ -37,5 +39,18 @@ export class MockPaymentGatewayAdapter implements PaymentGatewayClient {
       provider: 'mock',
       providerRef: `mock_${randomUUID()}`,
     };
+  }
+
+  /**
+   * Never called in practice -- charge() above never returns PENDING, so
+   * nothing ever waits on a webhook for the mock gateway. Implemented (not
+   * omitted) only because PaymentGatewayClient requires it; throws instead
+   * of silently pretending to parse a payload that was never going to
+   * arrive for real.
+   */
+  async parseWebhook(): Promise<PaymentWebhookEvent> {
+    throw new Error(
+      'MockPaymentGatewayAdapter does not receive webhooks -- it always resolves synchronously in charge().',
+    );
   }
 }

@@ -10,6 +10,7 @@ import {
 } from '../../common/pagination/pagination';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { PublicReviewsQueryDto } from './dto/public-reviews-query.dto';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 
 /**
  * Fase B do roadmap pós-entrega (ver roadmap-mercado-livre.md, seção 6):
@@ -82,6 +83,35 @@ export class ReviewsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Avaliações recebidas pela loja autenticada, todas — não filtra por
+   * productId como listPublic acima. Backs the seller "Avaliações" panel
+   * (ver status-migracao-microservicos.md). Mesmo padrão de cursor
+   * pagination do resto do serviço; sem @unique/tenant check de cursor
+   * cross-seller necessário aqui porque quem chama já vem autenticado como
+   * o próprio vendedor (SellerContextGuard, ver seller-reviews.controller.ts) —
+   * mesmo raciocínio de SellerOrdersController/listForSeller.
+   */
+  async listForSeller(sellerId: string, query: PaginationQueryDto = {}) {
+    const { limit, cursor } = resolvePagination(query);
+
+    await requireCursor(cursor, async (id) => {
+      const review = await this.prisma.review.findFirst({
+        where: { id, sellerId },
+        select: { id: true },
+      });
+      return review !== null;
+    });
+
+    const rows = await this.prisma.review.findMany({
+      ...prismaIdCursorArgs(limit, cursor),
+      where: { sellerId },
+      orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
+    });
+
+    return buildPage(rows, limit);
   }
 
   async listPublic(query: PublicReviewsQueryDto) {

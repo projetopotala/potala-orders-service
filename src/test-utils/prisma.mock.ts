@@ -123,5 +123,6 @@ export function createCatalogServiceClientMock() {
 export function createPaymentGatewayClientMock() {
   return {
     charge: jest.fn(),
+    parseWebhook: jest.fn(),
   };
 }
