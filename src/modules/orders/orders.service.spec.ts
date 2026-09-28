@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client';
 import { OrdersService } from './orders.service';
 import {
   createCatalogServiceClientMock,
+  createCouponsServiceMock,
   createPaymentGatewayClientMock,
   createPrismaMock,
 } from '../../test-utils/prisma.mock';
@@ -62,6 +63,7 @@ function setUpHappyPath() {
   const prisma = createPrismaMock();
   const catalogServiceClient = createCatalogServiceClientMock();
   const paymentGateway = createPaymentGatewayClientMock();
+  const couponsService = createCouponsServiceMock();
 
   catalogServiceClient.resolveVariants.mockResolvedValue([resolvedVariant()]);
   catalogServiceClient.reserveInventory.mockResolvedValue(undefined);
@@ -90,9 +92,10 @@ function setUpHappyPath() {
     prisma as never,
     catalogServiceClient as never,
     paymentGateway as never,
+    couponsService as never,
   );
 
-  return { service, prisma, catalogServiceClient, paymentGateway };
+  return { service, prisma, catalogServiceClient, paymentGateway, couponsService };
 }
 
 function uniqueOrderNumberViolation() {

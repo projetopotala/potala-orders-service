@@ -59,6 +59,21 @@ enum PaymentTransactionStatus {
   @@schema("orders")
 }
 
+enum CouponDiscountType {
+  PERCENT
+  FIXED
+
+  @@schema("orders")
+}
+
+enum ReturnStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+
+  @@schema("orders")
+}
+
 model Order {
   id            String      @id @default(uuid()) @db.Uuid
   /// Referência solta (UUID) a identity.usuarios — sem FK cross-schema.
@@ -156,6 +171,7 @@ model OrderItem {
 
   sellerOrder SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
   review      Review?
+  returnRequest Return?
 
   @@index([sellerOrderId])
   @@index([productId])
@@ -227,5 +243,113 @@ model Review {
   @@index([productId])
   @@index([sellerId])
   @@map("avaliacoes")
+  @@schema("orders")
+}
+
+/// Cupons de desconto -- pedido de Arthur (urgente, ver
+/// status-migracao-microservicos.md). Vive em orders-service, não em
+/// sellers-service ou catalog-service, porque: (1) não tem sellerId --
+/// mock confirma cupom é sempre marketplace-wide, nunca por loja
+/// (ver src/features/admin/domain/types.ts no frontend, sem esse campo);
+/// (2) Order já tinha uma coluna discountCents zerada à espera disso desde
+/// a extração original do monólito ("v1 não calcula frete nem descontos --
+/// sempre 0", orders.service.ts) -- este model é o que finalmente
+/// preenche esse buraco, no mesmo serviço que já possui a coluna.
+///
+/// status (ativo/agendado/expirado/desativado, como no mock) NÃO é uma
+/// coluna própria -- é derivado em runtime de enabled + comeca_em/termina_em
+/// (CouponsService.deriveStatus), pelo mesmo motivo de Review não guardar
+/// nota agregada: evita job de background pra manter um campo sincronizado
+/// que dá pra calcular na leitura.
+///
+/// usageCount/totalDiscountCents são contadores atômicos incrementados no
+/// checkout (mesma transação que cria o Order -- ver insertOrder em
+/// orders.service.ts), não uma tabela de resgate à parte: mantém a
+/// migration no menor escopo possível, mesmo raciocínio que já vinha sendo
+/// aplicado nesta sessão (Admin: Clientes sem AuditLog). totalDiscountCents
+/// substitui o "revenueCents" do mock -- aquele nome media receita
+/// atribuída ao cupom, que não é computável sem juntar todo pedido que usou
+/// o cupom; o que dá pra somar honestamente aqui é o desconto que o cupom
+/// efetivamente concedeu.
+///
+/// channel do mock (all/site/app) foi removido -- não existe app do
+/// marketplace, só o storefront web, então "canal" não distingue nada de
+/// real hoje. Mesmo princípio de remover campo sem contrapartida real já
+/// usado em CustomersView/SellersView.
+model Coupon {
+  id            String             @id @default(uuid()) @db.Uuid
+  code          String             @unique @map("codigo")
+  name          String             @map("nome")
+  discountType  CouponDiscountType @map("tipo_desconto")
+  /// Percentual (1-100) ou centavos (>0), a depender de discountType --
+  /// CHECKs na migration, mesmo padrão de Review.rating.
+  discountValue Int                @map("valor_desconto")
+  /// Liga/desliga manual do admin (botão "Ativar"/"Desativar" no mock).
+  /// Independente de comeca_em/termina_em -- um cupom pode estar dentro da
+  /// janela de vigência e ainda assim desativado.
+  enabled       Boolean            @default(true) @map("habilitado")
+  startsAt      DateTime           @map("comeca_em")
+  endsAt        DateTime           @map("termina_em")
+  usageCount    Int                @default(0) @map("usos")
+  totalDiscountCents Int           @default(0) @map("desconto_total_centavos")
+  createdAt     DateTime           @default(now()) @map("criado_em")
+  updatedAt     DateTime           @updatedAt @map("atualizado_em")
+
+  @@index([enabled])
+  @@map("cupons")
+  @@schema("orders")
+}
+
+/// Devoluções -- pedido de Arthur ("vamos seguir em frente"), Fase E do
+/// roadmap pós-entrega adiantada (ver roadmap-mercado-livre.md, seção 3:
+/// "proteção ao comprador... o painel admin já tem a estrutura de
+/// moderação... o admin como mediador"). Vive em orders-service, mesmo
+/// raciocínio de Review: este serviço já é dono do OrderItem, e "só quem
+/// comprou pode pedir devolução, uma vez por item" só é barato de garantir
+/// referenciando o item de pedido diretamente, com @unique no próprio
+/// banco -- não só na aplicação.
+///
+/// Elegibilidade (mesma de Review, mesmo motivo): SellerOrder com status
+/// CONFIRMED, não "entregue" -- rastreio real (Fase D) não existe no
+/// sistema, e nenhum endpoint hoje avança um SellerOrder além de
+/// CONFIRMED, então "só pedido entregue" (como o mock antigo dizia)
+/// nunca teria nenhum resultado elegível.
+///
+/// status é só REQUESTED/APPROVED/REJECTED -- de propósito SEM
+/// reembolso automático: reembolsar de verdade exigiria (a) um
+/// discriminador CHARGE/REFUND em PaymentTransaction, que hoje só
+/// modela cobranças (ver comentário no model PaymentTransaction acima:
+/// "Refunds must not use negative amounts; add a type discriminator
+/// first"), e (b) repor estoque de volta em catalog-service, que hoje
+/// não tem nenhum método pra isso (reserve/release/commitReservedStock
+/// cobrem reserva e venda, não devolução pós-venda). Os dois exigiriam
+/// migration/endpoint novo num SEGUNDO serviço -- escopo maior do que
+/// cabe nesta rodada. O admin aprovando fica registrado como decisão
+/// real; o reembolso em si é processado por fora do sistema por
+/// enquanto (nota explícita na tela, mesmo espírito de honestidade já
+/// aplicado ao resto do projeto -- não finge um reembolso automático
+/// que não existe).
+model Return {
+  id          String       @id @default(uuid()) @db.Uuid
+  orderItemId String       @unique @map("item_pedido_id") @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios -- quem comprou. Resolvido
+  /// da sessão (SessionAuthGuard), nunca do corpo da requisição.
+  customerId  String       @map("cliente_id") @db.Uuid
+  /// Snapshot de SellerOrder.sellerId no momento do pedido de devolução.
+  sellerId    String       @map("vendedor_id") @db.Uuid
+  /// Snapshot de OrderItem.productId.
+  productId   String       @map("produto_id") @db.Uuid
+  reason      String       @map("motivo")
+  description String?      @map("descricao")
+  status      ReturnStatus @default(REQUESTED)
+  createdAt   DateTime     @default(now()) @map("criado_em")
+  updatedAt   DateTime     @updatedAt @map("atualizado_em")
+
+  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([sellerId])
+  @@index([status])
+  @@map("devolucoes")
   @@schema("orders")
 }

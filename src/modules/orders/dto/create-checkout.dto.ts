@@ -128,4 +128,15 @@ export class CreateCheckoutDto {
   @ValidateNested()
   @Type(() => ShippingAddressDto)
   shippingAddress!: ShippingAddressDto;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Optional coupon code, validated against Coupon at checkout time (CouponsService.resolveForCheckout) -- invalid, disabled, scheduled or expired codes reject the whole checkout.',
+  })
+  @IsOptional()
+  @TrimString()
+  @IsString()
+  @MaxLength(30)
+  couponCode?: string;
 }

@@ -126,3 +126,19 @@ export function createPaymentGatewayClientMock() {
     parseWebhook: jest.fn(),
   };
 }
+
+/**
+ * Fake CouponsService — OrdersService only calls resolveForCheckout (before
+ * the order-creation transaction) and recordUsage (inside it, via `tx`,
+ * which in these tests is the same PrismaMock passed to $transaction's
+ * callback -- see createPrismaMock's doc comment). Tests that don't set
+ * dto.couponCode never hit either method, so the default unconfigured
+ * jest.fn()s are enough; a test exercising a coupon configures
+ * resolveForCheckout.mockResolvedValue(...) itself.
+ */
+export function createCouponsServiceMock() {
+  return {
+    resolveForCheckout: jest.fn(),
+    recordUsage: jest.fn(),
+  };
+}

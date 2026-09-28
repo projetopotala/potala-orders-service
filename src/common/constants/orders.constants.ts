@@ -35,3 +35,15 @@ export const MAX_ORDER_NUMBER_RETRIES = 3;
 export const MIN_REVIEW_RATING = 1;
 export const MAX_REVIEW_RATING = 5;
 export const MAX_REVIEW_COMMENT_LENGTH = 2000;
+
+// --- Cupons (pedido de Arthur, urgente -- ver status-migracao-microservicos.md) ---
+export const MIN_COUPON_CODE_LENGTH = 3;
+export const MAX_COUPON_CODE_LENGTH = 30;
+export const MAX_COUPON_NAME_LENGTH = 200;
+/** Percentual: 1-100. Valor fixo: 1 até este teto (centavos) -- mesma ordem de grandeza de MAX_ITEM_QUANTITY acima, generoso o bastante pra qualquer desconto real, longe do teto do int4. */
+export const MAX_COUPON_FIXED_DISCOUNT_CENTS = 1_000_000;
+export const MAX_PERCENT_DISCOUNT = 100;
+
+// --- Devoluções (Fase E do roadmap pós-entrega adiantada -- ver roadmap-mercado-livre.md, seção 3) ---
+export const MAX_RETURN_REASON_LENGTH = 200;
+export const MAX_RETURN_DESCRIPTION_LENGTH = 2000;

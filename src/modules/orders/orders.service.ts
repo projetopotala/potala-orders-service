@@ -37,6 +37,7 @@ import {
   MAX_ORDER_NUMBER_RETRIES,
 } from '../../common/constants/orders.constants';
 import { CreateCheckoutDto, ShippingAddressDto } from './dto/create-checkout.dto';
+import { CouponsService } from './coupons.service';
 
 type ValidatedItem = {
   productId: string;
@@ -75,6 +76,7 @@ export class OrdersService {
     private readonly catalogServiceClient: CatalogServiceClient,
     @Inject(PAYMENT_GATEWAY_CLIENT)
     private readonly paymentGateway: PaymentGatewayClient,
+    private readonly couponsService: CouponsService,
   ) {}
 
   async listForCustomer(customerId: string, query: PaginationQueryDto = {}) {
@@ -120,12 +122,14 @@ export class OrdersService {
       where: { id: orderId, customerId },
       include: {
         shippingAddress: true,
-        // items.review incluído aqui (não em listForCustomer, mesma
-        // assimetria já documentada acima entre list/get) -- Fase B do
-        // roadmap pós-entrega: o frontend usa isso pra saber se já existe
-        // avaliação de um item antes de mostrar o formulário em "Meus
-        // Pedidos", sem precisar de uma chamada separada.
-        sellerOrders: { include: { items: { include: { review: true } } } },
+        // items.review e items.returnRequest incluídos aqui (não em
+        // listForCustomer, mesma assimetria já documentada acima entre
+        // list/get) -- o frontend usa isso pra saber se já existe
+        // avaliação/devolução de um item antes de mostrar os formulários
+        // em "Meus Pedidos", sem precisar de uma chamada separada.
+        sellerOrders: {
+          include: { items: { include: { review: true, returnRequest: true } } },
+        },
         paymentTransactions: true,
       },
     });
@@ -248,9 +252,22 @@ export class OrdersService {
     const validatedItems = await this.resolveAndValidateItems(dto.items);
     const sellerGroups = this.groupBySeller(validatedItems);
     const subtotalCents = this.sum(sellerGroups.map((group) => group.subtotalCents));
-    // v1 computes neither shipping nor discounts -- both are always 0. See README.md.
+    // v1 ainda não calcula frete -- sempre 0. Ver README.md. Desconto (via
+    // cupom) é resolvido logo abaixo, uma única vez, antes do loop de
+    // retry de número de pedido -- mesma razão de subtotalCents ser
+    // calculado aqui fora: a janela de validade de um cupom não muda entre
+    // milissegundos de retry.
     const shippingCents = 0;
-    const discountCents = 0;
+    let couponId: string | null = null;
+    let discountCents = 0;
+    if (dto.couponCode) {
+      const resolved = await this.couponsService.resolveForCheckout(
+        dto.couponCode,
+        subtotalCents,
+      );
+      couponId = resolved.couponId;
+      discountCents = resolved.discountCents;
+    }
     const totalCents = this.sum([subtotalCents, shippingCents]) - discountCents;
 
     const order = await this.createOrderWithRetry(
@@ -258,6 +275,7 @@ export class OrdersService {
       dto.shippingAddress,
       { subtotalCents, shippingCents, discountCents, totalCents },
       sellerGroups,
+      couponId,
     );
 
     const inventoryItems: InventoryItemInput[] = validatedItems.map((item) => ({
@@ -497,12 +515,21 @@ export class OrdersService {
       totalCents: number;
     },
     sellerGroups: SellerGroup[],
+    couponId: string | null,
   ) {
     for (let attempt = 0; attempt <= MAX_ORDER_NUMBER_RETRIES; attempt += 1) {
       const orderNumber = this.generateOrderNumber();
       try {
         return await this.prisma.$transaction((tx) =>
-          this.insertOrder(tx, customerId, orderNumber, shippingAddress, totals, sellerGroups),
+          this.insertOrder(
+            tx,
+            customerId,
+            orderNumber,
+            shippingAddress,
+            totals,
+            sellerGroups,
+            couponId,
+          ),
         );
       } catch (error) {
         // Anything other than an order-number collision is a real failure —
@@ -533,7 +560,16 @@ export class OrdersService {
       totalCents: number;
     },
     sellerGroups: SellerGroup[],
+    couponId: string | null,
   ) {
+    // Dentro da mesma transação que cria o Order: se o número de pedido
+    // colidir e esta tentativa for descartada, o rollback desfaz este
+    // incremento junto -- nunca conta um uso de cupom pra um pedido que
+    // não chegou a existir. Ver CouponsService.recordUsage.
+    if (couponId) {
+      await this.couponsService.recordUsage(tx, couponId, totals.discountCents);
+    }
+
     const order = await tx.order.create({
       data: {
         customerId,

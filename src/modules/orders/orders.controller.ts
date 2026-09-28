@@ -17,8 +17,10 @@ import {
 } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
+import { ReturnsService } from './returns.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
+import { CreateReturnDto } from './dto/create-return.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -41,6 +43,7 @@ export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
     private readonly reviewsService: ReviewsService,
+    private readonly returnsService: ReturnsService,
   ) {}
 
   @Post('checkout')
@@ -78,6 +81,22 @@ export class OrdersController {
     @Query() query: PaginationQueryDto,
   ) {
     return this.ordersService.listForCustomer(user.id, query);
+  }
+
+  // Registrado ANTES de '@Get(":id")' abaixo -- Nest casa rotas na
+  // ordem de registro (mesmo raciocínio já documentado em
+  // proxy-routes.ts pro api-gateway); se ficasse depois, uma chamada a
+  // GET /orders/returns cairia em getOne com id="returns", e
+  // ParseUUIDPipe rejeitaria com 400 em vez de listar as devoluções.
+  @Get('returns')
+  @ApiOperation({
+    summary: "Lists the authenticated customer's own return requests, newest first.",
+  })
+  async listReturns(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.returnsService.listForCustomer(user.id, query);
   }
 
   @Get(':id')
@@ -120,5 +139,31 @@ export class OrdersController {
     @Body() dto: CreateReviewDto,
   ) {
     return this.reviewsService.createReview(user.id, orderId, itemId, dto);
+  }
+
+  @Post(':orderId/items/:itemId/return')
+  @ApiParam({ name: 'orderId', format: 'uuid' })
+  @ApiParam({ name: 'itemId', format: 'uuid' })
+  @ApiOperation({
+    summary:
+      "Requests a return for one of the authenticated customer's own order items — one request per item, only after the seller has confirmed the order.",
+  })
+  @ApiResponse({ status: HttpStatus.CREATED, description: 'Return request created.' })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description:
+      "Order item does not exist, or does not belong to the caller's order (never distinguished from the caller's perspective).",
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: 'Seller order is not yet CONFIRMED, or a return was already requested for this item.',
+  })
+  async createReturn(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('orderId', new ParseUUIDPipe({ version: '4' })) orderId: string,
+    @Param('itemId', new ParseUUIDPipe({ version: '4' })) itemId: string,
+    @Body() dto: CreateReturnDto,
+  ) {
+    return this.returnsService.createReturn(user.id, orderId, itemId, dto);
   }
 }
