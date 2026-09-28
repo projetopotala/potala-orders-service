@@ -516,4 +516,69 @@ describe('OrdersService', () => {
       );
     });
   });
+
+  describe('fulfillment transitions (confirmForSeller/prepareForSeller/shipForSeller/deliverForSeller)', () => {
+    const CASES: Array<{
+      method: 'confirmForSeller' | 'prepareForSeller' | 'shipForSeller' | 'deliverForSeller';
+      from: string;
+      to: string;
+    }> = [
+      { method: 'confirmForSeller', from: 'PENDING', to: 'CONFIRMED' },
+      { method: 'prepareForSeller', from: 'CONFIRMED', to: 'PREPARING' },
+      { method: 'shipForSeller', from: 'PREPARING', to: 'SHIPPED' },
+      { method: 'deliverForSeller', from: 'SHIPPED', to: 'DELIVERED' },
+    ];
+
+    for (const { method, from, to } of CASES) {
+      it(`${method}: ${from} -> ${to} when the seller order is ${from}`, async () => {
+        const { service, prisma } = setUpHappyPath();
+        prisma.sellerOrder.findFirst.mockResolvedValue({
+          id: 'seller-order-1',
+          status: from,
+        });
+        prisma.sellerOrder.update.mockResolvedValue({
+          id: 'seller-order-1',
+          status: to,
+        });
+
+        const result = await service[method](SELLER_A, 'seller-order-1');
+
+        expect(prisma.sellerOrder.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 'seller-order-1', sellerId: SELLER_A },
+          }),
+        );
+        expect(prisma.sellerOrder.update).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 'seller-order-1' },
+            data: { status: to },
+          }),
+        );
+        expect(result).toEqual({ id: 'seller-order-1', status: to });
+      });
+
+      it(`${method}: 404 (never 403) for another store's seller order`, async () => {
+        const { service, prisma } = setUpHappyPath();
+        prisma.sellerOrder.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service[method](SELLER_A, 'someone-elses-seller-order'),
+        ).rejects.toBeInstanceOf(NotFoundException);
+        expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+      });
+
+      it(`${method}: 409 when the seller order is not ${from}`, async () => {
+        const { service, prisma } = setUpHappyPath();
+        prisma.sellerOrder.findFirst.mockResolvedValue({
+          id: 'seller-order-1',
+          status: 'CANCELLED',
+        });
+
+        await expect(
+          service[method](SELLER_A, 'seller-order-1'),
+        ).rejects.toBeInstanceOf(ConflictException);
+        expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+      });
+    }
+  });
 });

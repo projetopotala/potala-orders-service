@@ -11,6 +11,7 @@ export type PrismaMock = {
   };
   sellerOrder: {
     create: MockFn;
+    update: MockFn;
     updateMany: MockFn;
     findMany: MockFn;
     findFirst: MockFn;
@@ -48,6 +49,7 @@ export function createPrismaMock(): PrismaMock & PrismaService {
     },
     sellerOrder: {
       create: jest.fn(),
+      update: jest.fn(),
       updateMany: jest.fn(),
       findMany: jest.fn(),
       findFirst: jest.fn(),

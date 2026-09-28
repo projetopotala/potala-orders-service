@@ -209,6 +209,122 @@ export class OrdersService {
   }
 
   /**
+   * Shared tenant-scoped lookup for the four fulfillment transitions below.
+   * 404, never 403, for a SellerOrder that belongs to another store --
+   * same reasoning as getForSeller.
+   */
+  private async requireSellerOrderForStatusUpdate(
+    sellerId: string,
+    sellerOrderId: string,
+  ) {
+    const sellerOrder = await this.prisma.sellerOrder.findFirst({
+      where: { id: sellerOrderId, sellerId },
+      select: { id: true, status: true },
+    });
+    if (!sellerOrder) {
+      throw new NotFoundException('Seller order not found');
+    }
+    return sellerOrder;
+  }
+
+  private async updateSellerOrderStatus(
+    sellerOrderId: string,
+    status: SellerOrderStatus,
+  ) {
+    return this.prisma.sellerOrder.update({
+      where: { id: sellerOrderId },
+      data: { status },
+      include: {
+        items: true,
+        order: {
+          select: {
+            orderNumber: true,
+            status: true,
+            createdAt: true,
+            shippingAddress: true,
+          },
+        },
+      },
+    });
+  }
+
+  /**
+   * Fulfillment lifecycle for the seller's own SellerOrder, one explicit
+   * step at a time (never an arbitrary target status) -- same reasoning
+   * already used by every other state machine in this project
+   * (Coupon/Return/Content). Seller-driven only: CANCELLED is never
+   * reachable from here (checkout/refund path only, out of scope).
+   *
+   * PENDING -> CONFIRMED.
+   */
+  async confirmForSeller(sellerId: string, sellerOrderId: string) {
+    const existing = await this.requireSellerOrderForStatusUpdate(
+      sellerId,
+      sellerOrderId,
+    );
+    if (existing.status !== SellerOrderStatus.PENDING) {
+      throw new ConflictException(
+        'Only PENDING seller orders can be confirmed',
+      );
+    }
+    return this.updateSellerOrderStatus(
+      sellerOrderId,
+      SellerOrderStatus.CONFIRMED,
+    );
+  }
+
+  /** CONFIRMED -> PREPARING. */
+  async prepareForSeller(sellerId: string, sellerOrderId: string) {
+    const existing = await this.requireSellerOrderForStatusUpdate(
+      sellerId,
+      sellerOrderId,
+    );
+    if (existing.status !== SellerOrderStatus.CONFIRMED) {
+      throw new ConflictException(
+        'Only CONFIRMED seller orders can start preparing',
+      );
+    }
+    return this.updateSellerOrderStatus(
+      sellerOrderId,
+      SellerOrderStatus.PREPARING,
+    );
+  }
+
+  /** PREPARING -> SHIPPED. */
+  async shipForSeller(sellerId: string, sellerOrderId: string) {
+    const existing = await this.requireSellerOrderForStatusUpdate(
+      sellerId,
+      sellerOrderId,
+    );
+    if (existing.status !== SellerOrderStatus.PREPARING) {
+      throw new ConflictException(
+        'Only PREPARING seller orders can be shipped',
+      );
+    }
+    return this.updateSellerOrderStatus(
+      sellerOrderId,
+      SellerOrderStatus.SHIPPED,
+    );
+  }
+
+  /** SHIPPED -> DELIVERED. Terminal nesta v1 (sem "desfazer"). */
+  async deliverForSeller(sellerId: string, sellerOrderId: string) {
+    const existing = await this.requireSellerOrderForStatusUpdate(
+      sellerId,
+      sellerOrderId,
+    );
+    if (existing.status !== SellerOrderStatus.SHIPPED) {
+      throw new ConflictException(
+        'Only SHIPPED seller orders can be marked delivered',
+      );
+    }
+    return this.updateSellerOrderStatus(
+      sellerOrderId,
+      SellerOrderStatus.DELIVERED,
+    );
+  }
+
+  /**
    * Admin, marketplace-wide: every SellerOrder row, across every store, not
    * just one seller's own. Same shape as listForSeller above (SellerOrder é
    * a unidade financeira por vendedor, mesmo padrão de granularidade), só

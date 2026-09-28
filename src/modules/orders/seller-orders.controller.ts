@@ -3,6 +3,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Query,
   UseGuards,
 } from '@nestjs/common';
@@ -25,12 +26,16 @@ import { Role } from '../../common/types/identity-enums';
 import { SellerContext } from '../../common/types/authenticated-user';
 
 /**
- * Read-only on purpose (see status doc): the authenticated seller's own
- * SellerOrder rows, never the parent Order's other sellers' rows. No
- * status-update route here yet — fulfillment writes are a separate,
- * explicitly out-of-scope follow-up. SellerContextGuard/SellerActiveGuard
+ * The authenticated seller's own SellerOrder rows, never the parent
+ * Order's other sellers' rows. SellerContextGuard/SellerActiveGuard
  * resolve sellerId over the network (via sellers-service), same pattern
  * catalog-service already uses for its own seller/* routes.
+ *
+ * Fulfillment status is now writable (28/09, scope confirmed with Arthur:
+ * "só avançar status", no carrier/tracking fields -- those don't exist in
+ * the schema): one explicit forward step at a time, never an arbitrary
+ * target status, same pattern as AdminContentsController's moderation
+ * transitions in catalog-service.
  */
 @ApiTags('seller-orders')
 @ApiBearerAuth()
@@ -68,5 +73,61 @@ export class SellerOrdersController {
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
   ) {
     return this.ordersService.getForSeller(seller.sellerId, id);
+  }
+
+  @Patch(':id/confirm')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({ summary: 'PENDING -> CONFIRMED.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The seller order is not PENDING.',
+  })
+  confirm(
+    @CurrentSeller() seller: SellerContext,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.ordersService.confirmForSeller(seller.sellerId, id);
+  }
+
+  @Patch(':id/prepare')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({ summary: 'CONFIRMED -> PREPARING.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The seller order is not CONFIRMED.',
+  })
+  prepare(
+    @CurrentSeller() seller: SellerContext,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.ordersService.prepareForSeller(seller.sellerId, id);
+  }
+
+  @Patch(':id/ship')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({ summary: 'PREPARING -> SHIPPED.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The seller order is not PREPARING.',
+  })
+  ship(
+    @CurrentSeller() seller: SellerContext,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.ordersService.shipForSeller(seller.sellerId, id);
+  }
+
+  @Patch(':id/deliver')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({ summary: 'SHIPPED -> DELIVERED.' })
+  @ApiResponse({
+    status: 409,
+    description: 'The seller order is not SHIPPED.',
+  })
+  deliver(
+    @CurrentSeller() seller: SellerContext,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.ordersService.deliverForSeller(seller.sellerId, id);
   }
 }
