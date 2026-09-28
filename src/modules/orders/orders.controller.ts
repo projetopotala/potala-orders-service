@@ -18,6 +18,7 @@ import {
 import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
 import { ReturnsService } from './returns.service';
+import { CouponsService } from './coupons.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
@@ -44,6 +45,7 @@ export class OrdersController {
     private readonly ordersService: OrdersService,
     private readonly reviewsService: ReviewsService,
     private readonly returnsService: ReturnsService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   @Post('checkout')
@@ -97,6 +99,28 @@ export class OrdersController {
     @Query() query: PaginationQueryDto,
   ) {
     return this.returnsService.listForCustomer(user.id, query);
+  }
+
+  // Mesmo raciocínio do comentário acima em 'returns': registrado ANTES de
+  // '@Get(":id")' pra não cair em getOne com id="reviews"/"coupons".
+  @Get('reviews')
+  @ApiOperation({
+    summary:
+      "Lists the authenticated customer's own reviews (all stores), newest first.",
+  })
+  async listReviews(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.reviewsService.listForCustomer(user.id, query);
+  }
+
+  @Get('coupons')
+  @ApiOperation({
+    summary: 'Lists currently active, marketplace-wide coupons.',
+  })
+  async listCoupons() {
+    return this.couponsService.listActive();
   }
 
   @Get(':id')

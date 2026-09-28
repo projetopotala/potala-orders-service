@@ -114,6 +114,36 @@ export class ReviewsService {
     return buildPage(rows, limit);
   }
 
+  /**
+   * Avaliações enviadas pelo cliente autenticado, todas as lojas juntas —
+   * mesmo raciocínio de listForSeller acima, só que filtrando por
+   * customerId em vez de sellerId. Backs the customer "Avaliações" panel
+   * (`/minha-conta/avaliacoes`, ver status-migracao-microservicos.md).
+   * Somente leitura: não existe endpoint de edição de Review (só criação,
+   * via createReview acima) — decisão de escopo confirmada com o Arthur,
+   * a tela real não repete a função "editar avaliação publicada" que o
+   * mock antigo tinha.
+   */
+  async listForCustomer(customerId: string, query: PaginationQueryDto = {}) {
+    const { limit, cursor } = resolvePagination(query);
+
+    await requireCursor(cursor, async (id) => {
+      const review = await this.prisma.review.findFirst({
+        where: { id, customerId },
+        select: { id: true },
+      });
+      return review !== null;
+    });
+
+    const rows = await this.prisma.review.findMany({
+      ...prismaIdCursorArgs(limit, cursor),
+      where: { customerId },
+      orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
+    });
+
+    return buildPage(rows, limit);
+  }
+
   async listPublic(query: PublicReviewsQueryDto) {
     const { limit, cursor } = resolvePagination(query);
 
