@@ -1,4 +1,8 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, SellerOrderStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import {
@@ -26,10 +30,13 @@ export class ReviewsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Elegibilidade v1: SellerOrder com status CONFIRMED. Ainda não existe
-   * conceito de "entregue" no sistema (rastreio é Fase D, não
-   * implementada) — ver roadmap-mercado-livre.md, seção 6. Tenant-scoped em
-   * SQL, mesmo raciocínio de 404 indistinguível já usado em
+   * Elegibilidade v1: SellerOrder com status DELIVERED -- corrigido em
+   * 29/09 (achado na preparação da regressão geral: DELIVERED já existe e
+   * é alcançável via OrdersService.deliverForSeller desde que o
+   * fulfillment ganhou seus 4 estágios; esta checagem continuava presa em
+   * CONFIRMED, herdada de quando "entregue" ainda não existia no sistema
+   * -- ver roadmap-mercado-livre.md, seção 6). Tenant-scoped em SQL,
+   * mesmo raciocínio de 404 indistinguível já usado em
    * OrdersService.getForCustomer: um orderItemId que não pertence ao
    * orderId informado, ou a um pedido de outro cliente, não deve ser
    * distinguível de um id inexistente.
@@ -52,9 +59,9 @@ export class ReviewsService {
       throw new NotFoundException('Order item not found');
     }
 
-    if (orderItem.sellerOrder.status !== SellerOrderStatus.CONFIRMED) {
+    if (orderItem.sellerOrder.status !== SellerOrderStatus.DELIVERED) {
       throw new ConflictException(
-        'Review is only allowed once the seller has confirmed this order',
+        'Review is only allowed once this order has been delivered',
       );
     }
 
@@ -79,7 +86,9 @@ export class ReviewsService {
       });
     } catch (error) {
       if (this.isReviewConflict(error)) {
-        throw new ConflictException('This order item has already been reviewed');
+        throw new ConflictException(
+          'This order item has already been reviewed',
+        );
       }
       throw error;
     }

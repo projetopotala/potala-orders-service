@@ -1,4 +1,8 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma, ReturnStatus, SellerOrderStatus } from '@prisma/client';
 import { PrismaService } from '../../database/prisma.service';
 import {
@@ -25,10 +29,13 @@ export class ReturnsService {
   constructor(private readonly prisma: PrismaService) {}
 
   /**
-   * Elegibilidade v1: SellerOrder com status CONFIRMED -- mesmo motivo de
-   * ReviewsService.createReview (não existe "entregue" no sistema ainda).
-   * Tenant-scoped em SQL, mesmo raciocínio de 404 indistinguível já usado
-   * em toda escrita autenticada deste serviço.
+   * Elegibilidade v1: SellerOrder com status DELIVERED -- corrigido em
+   * 29/09, mesmo achado e mesmo motivo de ReviewsService.createReview
+   * (DELIVERED já existe e é alcançável via deliverForSeller; esta
+   * checagem continuava presa em CONFIRMED, herdada de quando "entregue"
+   * ainda não existia no sistema). Tenant-scoped em SQL, mesmo raciocínio
+   * de 404 indistinguível já usado em toda escrita autenticada deste
+   * serviço.
    */
   async createReturn(
     customerId: string,
@@ -48,9 +55,9 @@ export class ReturnsService {
       throw new NotFoundException('Order item not found');
     }
 
-    if (orderItem.sellerOrder.status !== SellerOrderStatus.CONFIRMED) {
+    if (orderItem.sellerOrder.status !== SellerOrderStatus.DELIVERED) {
       throw new ConflictException(
-        'Return is only allowed once the seller has confirmed this order',
+        'Return is only allowed once this order has been delivered',
       );
     }
 
@@ -58,7 +65,9 @@ export class ReturnsService {
     // check só existe pra devolver 409 com mensagem clara em vez de erro
     // de constraint cru -- mesmo padrão de ReviewsService.
     if (orderItem.returnRequest) {
-      throw new ConflictException('A return has already been requested for this order item');
+      throw new ConflictException(
+        'A return has already been requested for this order item',
+      );
     }
 
     try {
@@ -74,7 +83,9 @@ export class ReturnsService {
       });
     } catch (error) {
       if (this.isReturnConflict(error)) {
-        throw new ConflictException('A return has already been requested for this order item');
+        throw new ConflictException(
+          'A return has already been requested for this order item',
+        );
       }
       throw error;
     }
@@ -99,7 +110,9 @@ export class ReturnsService {
         orderItem: {
           select: {
             productTitle: true,
-            sellerOrder: { select: { order: { select: { orderNumber: true } } } },
+            sellerOrder: {
+              select: { order: { select: { orderNumber: true } } },
+            },
           },
         },
       },
@@ -132,7 +145,9 @@ export class ReturnsService {
           select: {
             productTitle: true,
             sku: true,
-            sellerOrder: { select: { order: { select: { orderNumber: true } } } },
+            sellerOrder: {
+              select: { order: { select: { orderNumber: true } } },
+            },
           },
         },
       },

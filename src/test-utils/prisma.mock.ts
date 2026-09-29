@@ -18,6 +18,13 @@ export type PrismaMock = {
   };
   orderItem: {
     create: MockFn;
+    findFirst: MockFn;
+  };
+  review: {
+    create: MockFn;
+  };
+  return: {
+    create: MockFn;
   };
   paymentTransaction: {
     create: MockFn;
@@ -55,6 +62,13 @@ export function createPrismaMock(): PrismaMock & PrismaService {
       findFirst: jest.fn(),
     },
     orderItem: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+    },
+    review: {
+      create: jest.fn(),
+    },
+    return: {
       create: jest.fn(),
     },
     paymentTransaction: {
