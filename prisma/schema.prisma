@@ -353,3 +353,32 @@ model Return {
   @@map("devolucoes")
   @@schema("orders")
 }
+
+/// Lista de desejos do cliente -- produto <-> cliente, sem relação com
+/// pedido nenhum (diferente de Review/Coupon/Return acima, todos nascidos
+/// de uma compra). Vive aqui mesmo assim, não em identity-service: segue a
+/// mesma decisão já tomada na prática para avaliações e cupons (a análise
+/// de arquitetura original previa "customers" crescendo dentro de
+/// identity-service, mas o crescimento real -- avaliações, cupons -- caiu
+/// todo em orders-service; endereços continua a única exceção genuína, por
+/// ser puramente identidade/PII, sem nenhum link a produto).
+model Favorite {
+  id         String   @id @default(uuid()) @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios. Resolvido da sessão
+  /// (SessionAuthGuard), nunca do corpo da requisição -- mesmo padrão de
+  /// Review.customerId acima.
+  customerId String   @map("cliente_id") @db.Uuid
+  /// Referência solta (UUID) a catalog.produtos -- sem FK cross-schema,
+  /// mesmo padrão de Review.productId. Ao contrário de Review (snapshot do
+  /// produto no momento da compra), aqui NÃO guardamos nome/imagem/preço:
+  /// a lista de favoritos deve refletir o produto como ele está agora, não
+  /// como estava quando foi favoritado -- o frontend resolve cada item via
+  /// GET /public/products/:id (catalog-service) na hora de exibir.
+  productId  String   @map("produto_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("criado_em")
+
+  @@unique([customerId, productId])
+  @@index([customerId])
+  @@map("favoritos")
+  @@schema("orders")
+}

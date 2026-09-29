@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
@@ -19,9 +21,11 @@ import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
 import { ReturnsService } from './returns.service';
 import { CouponsService } from './coupons.service';
+import { FavoritesService } from './favorites.service';
 import { CreateCheckoutDto } from './dto/create-checkout.dto';
 import { CreateReviewDto } from './dto/create-review.dto';
 import { CreateReturnDto } from './dto/create-return.dto';
+import { CreateFavoriteDto } from './dto/create-favorite.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -46,6 +50,7 @@ export class OrdersController {
     private readonly reviewsService: ReviewsService,
     private readonly returnsService: ReturnsService,
     private readonly couponsService: CouponsService,
+    private readonly favoritesService: FavoritesService,
   ) {}
 
   @Post('checkout')
@@ -121,6 +126,38 @@ export class OrdersController {
   })
   async listCoupons() {
     return this.couponsService.listActive();
+  }
+
+  // Mesmo raciocínio de 'returns'/'reviews'/'coupons' acima: registrado
+  // ANTES de '@Get(":id")' pra não cair em getOne com id="favorites".
+  @Get('favorites')
+  @ApiOperation({
+    summary: "Lists the authenticated customer's own favorited products, newest first.",
+  })
+  async listFavorites(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.favoritesService.listForCustomer(user.id, query);
+  }
+
+  @Post('favorites')
+  @ApiOperation({ summary: 'Favorites a product for the authenticated customer (idempotent).' })
+  async addFavorite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateFavoriteDto,
+  ) {
+    return this.favoritesService.add(user.id, dto.productId);
+  }
+
+  @Delete('favorites/:productId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({ summary: 'Unfavorites a product for the authenticated customer (idempotent).' })
+  async removeFavorite(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('productId', new ParseUUIDPipe({ version: '4' })) productId: string,
+  ) {
+    return this.favoritesService.remove(user.id, productId);
   }
 
   @Get(':id')

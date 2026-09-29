@@ -11,6 +11,7 @@ import { AdminReturnsController } from './admin-returns.controller';
 import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
 import { CouponsService } from './coupons.service';
+import { FavoritesService } from './favorites.service';
 import { ReturnsService } from './returns.service';
 import { PaymentsModule } from '../payments/payments.module';
 
@@ -44,6 +45,6 @@ import { PaymentsModule } from '../payments/payments.module';
     SellerCouponsController,
     AdminReturnsController,
   ],
-  providers: [OrdersService, ReviewsService, CouponsService, ReturnsService],
+  providers: [OrdersService, ReviewsService, CouponsService, ReturnsService, FavoritesService],
 })
 export class OrdersModule {}
