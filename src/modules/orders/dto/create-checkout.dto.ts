@@ -3,6 +3,7 @@ import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayMinSize,
+  IsDefined,
   IsInt,
   IsNotEmpty,
   IsOptional,
@@ -125,6 +126,7 @@ export class CreateCheckoutDto {
   items!: CheckoutItemDto[];
 
   @ApiProperty({ type: ShippingAddressDto })
+  @IsDefined()
   @ValidateNested()
   @Type(() => ShippingAddressDto)
   shippingAddress!: ShippingAddressDto;

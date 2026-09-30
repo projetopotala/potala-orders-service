@@ -174,6 +174,7 @@ describe('OrdersService', () => {
         orderId: 'order-1',
         orderNumber: 'PED-TEST-1',
         amountCents: 2000,
+        splits: [{ sellerId: SELLER_A, amountCents: 2000 }],
       });
       expect(prisma.paymentTransaction.update).toHaveBeenCalledWith(
         expect.objectContaining({
