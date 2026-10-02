@@ -255,21 +255,27 @@ export class OrdersService {
    * (Coupon/Return/Content). Seller-driven only: CANCELLED is never
    * reachable from here (checkout/refund path only, out of scope).
    *
-   * PENDING -> CONFIRMED.
+   * PENDING -> CONFIRMED is deliberately NOT part of this seller-driven
+   * lifecycle (bug found in production regression, 02/10): that
+   * transition belongs exclusively to the payment-approval flow
+   * (finalizeApprovedPayment below, via sellerOrder.updateMany scoped by
+   * orderId, inside the same $transaction that marks the Order PAID).
+   * Every sibling SellerOrder of a paid Order is already CONFIRMED by the
+   * time payment succeeds, so a SellerOrder can never legitimately still
+   * be PENDING while its own Order is PAID -- there is no valid
+   * Order.status to gate on here, checking Order.status === PAID would
+   * just add a dead branch that can never be true for a real PENDING row.
+   * The only correct rule is unconditional: a seller can never confirm
+   * PENDING -> CONFIRMED manually, full stop. Ownership/ownership-404
+   * stays identical to every other transition below.
    */
-  async confirmForSeller(sellerId: string, sellerOrderId: string) {
-    const existing = await this.requireSellerOrderForStatusUpdate(
-      sellerId,
-      sellerOrderId,
-    );
-    if (existing.status !== SellerOrderStatus.PENDING) {
-      throw new ConflictException(
-        'Only PENDING seller orders can be confirmed',
-      );
-    }
-    return this.updateSellerOrderStatus(
-      sellerOrderId,
-      SellerOrderStatus.CONFIRMED,
+  async confirmForSeller(
+    sellerId: string,
+    sellerOrderId: string,
+  ): Promise<never> {
+    await this.requireSellerOrderForStatusUpdate(sellerId, sellerOrderId);
+    throw new ConflictException(
+      'Seller orders are confirmed automatically once payment is approved; manual confirmation by the seller is not allowed',
     );
   }
 

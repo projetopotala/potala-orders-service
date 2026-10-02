@@ -518,13 +518,57 @@ describe('OrdersService', () => {
     });
   });
 
+  describe('confirmForSeller (seller can never confirm manually -- bug de producao, 02/10)', () => {
+    it('A/B) rejects a PENDING seller order (no manual confirm) and never calls prisma.sellerOrder.update', async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue({
+        id: 'seller-order-1',
+        status: 'PENDING',
+      });
+
+      await expect(
+        service.confirmForSeller(SELLER_A, 'seller-order-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+
+      expect(prisma.sellerOrder.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'seller-order-1', sellerId: SELLER_A },
+        }),
+      );
+      expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+      expect(prisma.sellerOrder.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("rejects regardless of the seller order's current status (unconditional -- no Order.status escape hatch)", async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue({
+        id: 'seller-order-1',
+        status: 'CONFIRMED',
+      });
+
+      await expect(
+        service.confirmForSeller(SELLER_A, 'seller-order-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+    });
+
+    it("C) 404 (never 403) for another store's seller order -- ownership check still runs first", async () => {
+      const { service, prisma } = setUpHappyPath();
+      prisma.sellerOrder.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.confirmForSeller(SELLER_A, 'someone-elses-seller-order'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('fulfillment transitions (confirmForSeller/prepareForSeller/shipForSeller/deliverForSeller)', () => {
     const CASES: Array<{
-      method: 'confirmForSeller' | 'prepareForSeller' | 'shipForSeller' | 'deliverForSeller';
+      method: 'prepareForSeller' | 'shipForSeller' | 'deliverForSeller';
       from: string;
       to: string;
     }> = [
-      { method: 'confirmForSeller', from: 'PENDING', to: 'CONFIRMED' },
       { method: 'prepareForSeller', from: 'CONFIRMED', to: 'PREPARING' },
       { method: 'shipForSeller', from: 'PREPARING', to: 'SHIPPED' },
       { method: 'deliverForSeller', from: 'SHIPPED', to: 'DELIVERED' },
