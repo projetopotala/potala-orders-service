@@ -13,6 +13,8 @@ import { ReviewsService } from './reviews.service';
 import { CouponsService } from './coupons.service';
 import { FavoritesService } from './favorites.service';
 import { ReturnsService } from './returns.service';
+import { ClaimsService } from './claims.service';
+import { DisputesService } from './disputes.service';
 import { PaymentsModule } from '../payments/payments.module';
 
 /**
@@ -31,6 +33,14 @@ import { PaymentsModule } from '../payments/payments.module';
  * seguem o mesmo raciocínio para Coupon (pedido de Arthur, urgente -- ver
  * comentário no model Coupon em schema.prisma). AdminReturnsController
  * segue o mesmo raciocínio para Return (ver comentário no model Return).
+ *
+ * ClaimsService/DisputesService (pós-venda, fundação P0 -- ver
+ * claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md) são
+ * registrados aqui como providers SOMENTE -- nenhum controller novo
+ * nesta rodada (pedido explícito: parar e explicar antes de criar
+ * qualquer controller novo, e não foi necessário nenhum pra entregar a
+ * camada de serviço + testes). Ficam disponíveis pra injeção quando a
+ * exposição HTTP for decidida numa rodada futura.
  */
 @Module({
   imports: [PaymentsModule],
@@ -45,6 +55,14 @@ import { PaymentsModule } from '../payments/payments.module';
     SellerCouponsController,
     AdminReturnsController,
   ],
-  providers: [OrdersService, ReviewsService, CouponsService, ReturnsService, FavoritesService],
+  providers: [
+    OrdersService,
+    ReviewsService,
+    CouponsService,
+    ReturnsService,
+    FavoritesService,
+    ClaimsService,
+    DisputesService,
+  ],
 })
 export class OrdersModule {}

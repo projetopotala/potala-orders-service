@@ -25,6 +25,36 @@ export type PrismaMock = {
   };
   return: {
     create: MockFn;
+    findUnique: MockFn;
+    findFirst: MockFn;
+    update: MockFn;
+    updateMany: MockFn;
+  };
+  /** Pós-venda (fundação P0) -- somente os delegates realmente usados por ClaimsService/DisputesService hoje. */
+  claim: {
+    create: MockFn;
+    findFirst: MockFn;
+    findMany: MockFn;
+    findUnique: MockFn;
+    update: MockFn;
+    updateMany: MockFn;
+  };
+  claimMessage: {
+    create: MockFn;
+  };
+  claimEvidence: {
+    create: MockFn;
+  };
+  dispute: {
+    create: MockFn;
+    findFirst: MockFn;
+    findMany: MockFn;
+    findUnique: MockFn;
+    update: MockFn;
+    updateMany: MockFn;
+  };
+  disputeDecision: {
+    create: MockFn;
   };
   paymentTransaction: {
     create: MockFn;
@@ -69,6 +99,45 @@ export function createPrismaMock(): PrismaMock & PrismaService {
       create: jest.fn(),
     },
     return: {
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
+      update: jest.fn(),
+      // Default: CAS 'succeeds' ({ count: 1 }) unless a test overrides it to
+      // simulate a concurrent status change ({ count: 0 }) -- see
+      // ReturnsService.decide / DisputesService.openFromReturnOrigin.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+    claim: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      // Default: CAS 'succeeds' ({ count: 1 }) unless a test overrides it to
+      // simulate a concurrent status change ({ count: 0 }) -- see
+      // ClaimsService.transitionStatus / addMessage /
+      // DisputesService.openFromClaimOrigin.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+    claimMessage: {
+      create: jest.fn(),
+    },
+    claimEvidence: {
+      create: jest.fn(),
+    },
+    dispute: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+      // Default: CAS 'succeeds' ({ count: 1 }) unless a test overrides it to
+      // simulate a concurrent decision ({ count: 0 }) -- see
+      // DisputesService.recordDecision.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
+    disputeDecision: {
       create: jest.fn(),
     },
     paymentTransaction: {

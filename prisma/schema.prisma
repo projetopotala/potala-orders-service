@@ -70,6 +70,95 @@ enum ReturnStatus {
   REQUESTED
   APPROVED
   REJECTED
+  AWAITING_SHIPMENT
+  SHIPPED
+  RECEIVED
+  UNDER_REVIEW
+  COMPLETED
+  CONTESTED
+  CANCELLED
+
+  @@schema("orders")
+}
+
+// ---------------------------------------------------------------------------
+// Pos-venda -- fundacao (Fase E do roadmap, ver
+// claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md). Enums abaixo
+// sao usados pelos models Claim/ClaimMessage/ClaimEvidence/ReturnShipment/
+// Dispute/DisputeDecision mais abaixo no arquivo (apos o model Return).
+// ---------------------------------------------------------------------------
+
+/// Fase do ciclo de vida de uma Claim -- nunca o resultado (nao existe
+/// "quem tinha razao" aqui; RESOLVED/CLOSED so descrevem que a conversa
+/// terminou). Quando uma Claim escala a conflito formal, o resultado mora
+/// em Dispute/DisputeDecision, nunca neste enum.
+enum ClaimStatus {
+  OPEN
+  SELLER_RESPONSE_REQUIRED
+  CUSTOMER_RESPONSE_REQUIRED
+  RESOLVED
+  ESCALATED
+  CLOSED
+  CANCELLED
+
+  @@schema("orders")
+}
+
+/// Papel de quem escreveu uma ClaimMessage ou enviou uma ClaimEvidence --
+/// mirror enum do Role de identity-service (ver
+/// common/types/identity-enums.ts), mas como enum Prisma proprio deste
+/// schema: Role ali e so TS, nunca Prisma, porque User vive no schema
+/// identity, nao neste.
+enum ClaimAuthorRole {
+  CUSTOMER
+  SELLER
+  ADMIN
+
+  @@schema("orders")
+}
+
+/// Fase do ciclo de vida de uma Dispute -- nunca quem ganhou (ver
+/// DisputeOutcome). RESOLVED colapsa os tres valores originalmente
+/// propostos (RESOLVED_CUSTOMER/RESOLVED_SELLER/RESOLVED_PARTIAL): fase
+/// "resolvida" e resultado sao perguntas diferentes, e mistura-las
+/// impediria registrar o resultado como seu proprio registro auditavel
+/// (ver model DisputeDecision).
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  WAITING_CUSTOMER
+  WAITING_SELLER
+  RESOLVED
+  CLOSED
+
+  @@schema("orders")
+}
+
+/// O resultado de uma disputa -- nullable em Dispute.outcome enquanto
+/// aberta (ver model Dispute). Cada decisao registrada em DisputeDecision
+/// carrega seu proprio outcome tambem, pra preservar historico mesmo se
+/// uma decisao futura for revista.
+enum DisputeOutcome {
+  CUSTOMER_FAVORED
+  SELLER_FAVORED
+  PARTIAL
+  NO_ACTION
+
+  @@schema("orders")
+}
+
+/// Status de UMA tentativa de envio de devolucao -- nao da devolucao como
+/// um todo (ver ReturnStatus, acima). Return -> ReturnShipment e 1:N de
+/// proposito (nunca @@unique em returnId): uma tentativa perdida pelo
+/// transportador pode ser seguida por uma nova tentativa sem precisar
+/// remodelar nada depois -- "preparar para multiplas tentativas futuras
+/// sem superengenharia" (pedido original, item 9). Nenhuma integracao real
+/// de transportador nesta rodada -- carrier/trackingCode sao texto livre.
+enum ReturnShipmentStatus {
+  PENDING
+  POSTED
+  RECEIVED
+  LOST
 
   @@schema("orders")
 }
@@ -95,6 +184,8 @@ model Order {
   shippingAddress     OrderShippingAddress?
   sellerOrders        SellerOrder[]
   paymentTransactions PaymentTransaction[]
+  /// Pos-venda (fundacao) -- ver model Claim mais abaixo.
+  claims              Claim[]
 
   @@index([customerId])
   @@index([status])
@@ -140,8 +231,10 @@ model SellerOrder {
   createdAt       DateTime          @default(now()) @map("criado_em")
   updatedAt       DateTime          @updatedAt @map("atualizado_em")
 
-  order Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  items OrderItem[]
+  order  Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items  OrderItem[]
+  /// Pos-venda (fundacao) -- ver model Claim mais abaixo.
+  claims Claim[]
 
   @@unique([orderId, sellerId])
   @@index([orderId])
@@ -152,26 +245,29 @@ model SellerOrder {
 }
 
 model OrderItem {
-  id             String  @id @default(uuid()) @db.Uuid
-  sellerOrderId  String  @map("pedido_vendedor_id") @db.Uuid
+  id             String @id @default(uuid()) @db.Uuid
+  sellerOrderId  String @map("pedido_vendedor_id") @db.Uuid
   /// Referências soltas (UUID) a catalog.produtos / catalog.variantes_produto
   /// — sem FK cross-schema. Ambas vêm de
   /// CatalogServiceClient.resolveProductVariants, nunca de entrada bruta de
   /// cliente (o cliente manda productId/variantId candidatos; o que fica
   /// gravado aqui é sempre o que catalog-service confirmou).
-  productId      String  @map("produto_id") @db.Uuid
-  variantId      String  @map("variante_id") @db.Uuid
-  productTitle   String  @map("titulo_produto")
+  productId      String @map("produto_id") @db.Uuid
+  variantId      String @map("variante_id") @db.Uuid
+  productTitle   String @map("titulo_produto")
   sku            String
   /// Snapshot CHECKs: quantidade > 0, money >= 0. No formula lineTotal = qty * unitPrice
   /// (enforced in application code at write time; not re-derived by the database).
-  quantity       Int     @map("quantidade")
-  unitPriceCents Int     @map("preco_unitario_centavos")
-  lineTotalCents Int     @map("total_linha_centavos")
+  quantity       Int    @map("quantidade")
+  unitPriceCents Int    @map("preco_unitario_centavos")
+  lineTotalCents Int    @map("total_linha_centavos")
 
-  sellerOrder SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
-  review      Review?
+  sellerOrder   SellerOrder @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+  review        Review?
   returnRequest Return?
+  /// Pos-venda (fundacao) -- um item pode gerar mais de uma Claim ao
+  /// longo do tempo (diferente de Review/Return, que sao 1:1).
+  claims        Claim[]
 
   @@index([sellerOrderId])
   @@index([productId])
@@ -277,23 +373,23 @@ model Review {
 /// real hoje. Mesmo princípio de remover campo sem contrapartida real já
 /// usado em CustomersView/SellersView.
 model Coupon {
-  id            String             @id @default(uuid()) @db.Uuid
-  code          String             @unique @map("codigo")
-  name          String             @map("nome")
-  discountType  CouponDiscountType @map("tipo_desconto")
+  id                 String             @id @default(uuid()) @db.Uuid
+  code               String             @unique @map("codigo")
+  name               String             @map("nome")
+  discountType       CouponDiscountType @map("tipo_desconto")
   /// Percentual (1-100) ou centavos (>0), a depender de discountType --
   /// CHECKs na migration, mesmo padrão de Review.rating.
-  discountValue Int                @map("valor_desconto")
+  discountValue      Int                @map("valor_desconto")
   /// Liga/desliga manual do admin (botão "Ativar"/"Desativar" no mock).
   /// Independente de comeca_em/termina_em -- um cupom pode estar dentro da
   /// janela de vigência e ainda assim desativado.
-  enabled       Boolean            @default(true) @map("habilitado")
-  startsAt      DateTime           @map("comeca_em")
-  endsAt        DateTime           @map("termina_em")
-  usageCount    Int                @default(0) @map("usos")
-  totalDiscountCents Int           @default(0) @map("desconto_total_centavos")
-  createdAt     DateTime           @default(now()) @map("criado_em")
-  updatedAt     DateTime           @updatedAt @map("atualizado_em")
+  enabled            Boolean            @default(true) @map("habilitado")
+  startsAt           DateTime           @map("comeca_em")
+  endsAt             DateTime           @map("termina_em")
+  usageCount         Int                @default(0) @map("usos")
+  totalDiscountCents Int                @default(0) @map("desconto_total_centavos")
+  createdAt          DateTime           @default(now()) @map("criado_em")
+  updatedAt          DateTime           @updatedAt @map("atualizado_em")
 
   @@index([enabled])
   @@map("cupons")
@@ -310,47 +406,256 @@ model Coupon {
 /// banco -- não só na aplicação.
 ///
 /// Elegibilidade (mesma de Review, mesmo motivo): SellerOrder com status
-/// CONFIRMED, não "entregue" -- rastreio real (Fase D) não existe no
-/// sistema, e nenhum endpoint hoje avança um SellerOrder além de
-/// CONFIRMED, então "só pedido entregue" (como o mock antigo dizia)
-/// nunca teria nenhum resultado elegível.
+/// DELIVERED -- corrigido em 29/09 em returns.service.ts (este comentário
+/// aqui no schema ficou desatualizado até agora citando CONFIRMED; ver
+/// claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md, item 4.7).
 ///
-/// status é só REQUESTED/APPROVED/REJECTED -- de propósito SEM
-/// reembolso automático: reembolsar de verdade exigiria (a) um
-/// discriminador CHARGE/REFUND em PaymentTransaction, que hoje só
-/// modela cobranças (ver comentário no model PaymentTransaction acima:
-/// "Refunds must not use negative amounts; add a type discriminator
-/// first"), e (b) repor estoque de volta em catalog-service, que hoje
-/// não tem nenhum método pra isso (reserve/release/commitReservedStock
-/// cobrem reserva e venda, não devolução pós-venda). Os dois exigiriam
-/// migration/endpoint novo num SEGUNDO serviço -- escopo maior do que
-/// cabe nesta rodada. O admin aprovando fica registrado como decisão
-/// real; o reembolso em si é processado por fora do sistema por
-/// enquanto (nota explícita na tela, mesmo espírito de honestidade já
-/// aplicado ao resto do projeto -- não finge um reembolso automático
-/// que não existe).
+/// status segue sendo criado como REQUESTED e decidido via decide()
+/// (APPROVED/REJECTED) -- de propósito SEM reembolso automático:
+/// reembolsar de verdade exigiria (a) um discriminador CHARGE/REFUND em
+/// PaymentTransaction, que hoje só modela cobranças (ver comentário no
+/// model PaymentTransaction acima: "Refunds must not use negative
+/// amounts; add a type discriminator first"), e (b) repor estoque de
+/// volta em catalog-service, que hoje não tem nenhum método pra isso
+/// (reserve/release/commitReservedStock cobrem reserva e venda, não
+/// devolução pós-venda). O enum ganhou valores NOVOS nesta rodada
+/// (fundação do pós-venda -- ver plano acima) para o ciclo de logística
+/// reversa completo (AWAITING_SHIPMENT/SHIPPED/RECEIVED/UNDER_REVIEW/
+/// COMPLETED/CONTESTED/CANCELLED), de forma puramente aditiva -- nenhum
+/// valor existente foi removido ou renomeado, e decide()/o fluxo atual
+/// continuam funcionando sem mudança. As transições que usam os valores
+/// novos (ship/receive/review/contest) ficam para a próxima rodada (P1);
+/// esta é só a fundação de schema. O admin aprovando continua registrado
+/// como decisão real; o reembolso em si continua processado por fora do
+/// sistema por enquanto (nota explícita na tela, mesmo espírito de
+/// honestidade já aplicado ao resto do projeto).
 model Return {
-  id          String       @id @default(uuid()) @db.Uuid
-  orderItemId String       @unique @map("item_pedido_id") @db.Uuid
+  id                     String       @id @default(uuid()) @db.Uuid
+  orderItemId            String       @unique @map("item_pedido_id") @db.Uuid
   /// Referência solta (UUID) a identity.usuarios -- quem comprou. Resolvido
   /// da sessão (SessionAuthGuard), nunca do corpo da requisição.
-  customerId  String       @map("cliente_id") @db.Uuid
+  customerId             String       @map("cliente_id") @db.Uuid
   /// Snapshot de SellerOrder.sellerId no momento do pedido de devolução.
-  sellerId    String       @map("vendedor_id") @db.Uuid
+  sellerId               String       @map("vendedor_id") @db.Uuid
   /// Snapshot de OrderItem.productId.
-  productId   String       @map("produto_id") @db.Uuid
-  reason      String       @map("motivo")
-  description String?      @map("descricao")
-  status      ReturnStatus @default(REQUESTED)
-  createdAt   DateTime     @default(now()) @map("criado_em")
-  updatedAt   DateTime     @updatedAt @map("atualizado_em")
+  productId              String       @map("produto_id") @db.Uuid
+  reason                 String       @map("motivo")
+  description            String?      @map("descricao")
+  status                 ReturnStatus @default(REQUESTED)
+  /// Condição do item constatada na inspeção (passo UNDER_REVIEW,
+  /// fundação -- preenchimento real fica para P1). reviewedByUserId é
+  /// referência solta (identity.usuarios) a quem inspecionou (vendedor ou
+  /// admin), nunca o próprio cliente.
+  receivedConditionNotes String?      @map("notas_condicao_recebimento")
+  reviewedByUserId       String?      @map("revisado_por_usuario_id") @db.Uuid
+  createdAt              DateTime     @default(now()) @map("criado_em")
+  updatedAt              DateTime     @updatedAt @map("atualizado_em")
 
-  orderItem OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  orderItem   OrderItem        @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  /// Pos-venda (fundação) -- a Claim que gerou esta devolução, se houver.
+  /// A FK mora em Claim.returnId (não aqui), pra não duplicar o mesmo
+  /// relacionamento nos dois lados -- ver model Claim.
+  originClaim Claim?
+  /// Pos-venda (fundação) -- 1:N de propósito, ver enum ReturnShipmentStatus.
+  shipments   ReturnShipment[]
+  /// Pos-venda (fundação) -- preenchido só se esta devolução for contestada
+  /// e escalar a mediação formal. A FK mora em Dispute.returnId -- ver
+  /// model Dispute.
+  dispute     Dispute?
 
   @@index([customerId])
   @@index([sellerId])
   @@index([status])
   @@map("devolucoes")
+  @@schema("orders")
+}
+
+/// Reclamação (ticket de pós-venda) -- fundação da Fase E, primeira peça
+/// que não existia em NENHUMA forma antes desta rodada (ver
+/// claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md, item 5).
+/// Mais genérica que Return: nem toda reclamação é sobre devolver
+/// mercadoria ("item nunca chegou", "cobrança duplicada" também cabem
+/// aqui).
+///
+/// orderId/sellerOrderId/orderItemId são FK reais -- vivem no MESMO
+/// schema orders, diferente de customerId/sellerId (snapshot solto,
+/// identity-service/sellers-service, mesmo padrão de Return/Review
+/// acima). Denormalizados (orderId/sellerOrderId são alcançáveis via
+/// orderItem.sellerOrder) pelo mesmo motivo de Return.sellerId/productId
+/// já serem snapshot de OrderItem/SellerOrder: consulta direta sem join.
+///
+/// orderItemId NÃO é @unique (diferente de Review/Return) -- um mesmo
+/// item pode gerar mais de uma reclamação ao longo do tempo (ex.:
+/// reaberta depois de CLOSED). returnId é o link opcional "esta
+/// reclamação gerou uma devolução" -- a FK mora aqui, não em Return, pra
+/// não duplicar o mesmo relacionamento nos dois lados (mesmo raciocínio
+/// de Dispute.claimId/Dispute.returnId abaixo). O link inverso "esta
+/// reclamação escalou pra disputa formal" mora em Dispute.claimId, não
+/// aqui, pelo mesmo motivo -- ver model Dispute.
+model Claim {
+  id            String      @id @default(uuid()) @db.Uuid
+  orderId       String      @map("pedido_id") @db.Uuid
+  sellerOrderId String      @map("pedido_vendedor_id") @db.Uuid
+  orderItemId   String      @map("item_pedido_id") @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios -- sem FK cross-schema.
+  customerId    String      @map("cliente_id") @db.Uuid
+  /// Snapshot de SellerOrder.sellerId no momento da reclamação.
+  sellerId      String      @map("vendedor_id") @db.Uuid
+  reason        String      @map("motivo")
+  description   String?     @map("descricao")
+  status        ClaimStatus @default(OPEN)
+  /// Link opcional: esta reclamação gerou uma devolução formal.
+  returnId      String?     @unique @map("devolucao_id") @db.Uuid
+  createdAt     DateTime    @default(now()) @map("criado_em")
+  updatedAt     DateTime    @updatedAt @map("atualizado_em")
+  resolvedAt    DateTime?   @map("resolvido_em")
+
+  order       Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerOrder SellerOrder     @relation(fields: [sellerOrderId], references: [id], onDelete: Cascade)
+  orderItem   OrderItem       @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  return      Return?         @relation(fields: [returnId], references: [id])
+  dispute     Dispute?
+  messages    ClaimMessage[]
+  evidence    ClaimEvidence[]
+
+  @@index([customerId])
+  @@index([sellerId])
+  @@index([orderId])
+  @@index([sellerOrderId])
+  @@index([orderItemId])
+  @@index([status])
+  @@map("reclamacoes")
+  @@schema("orders")
+}
+
+/// Mensagem na conversa de uma Claim -- cliente, vendedor e admin no mesmo
+/// fio, nunca string livre pra papel (ClaimAuthorRole -- mesmo motivo de
+/// qualquer outro enum deste schema). authorUserId é snapshot solto
+/// (identity.usuarios, admin inclusive -- admin também é um usuário em
+/// identity-service). Nunca senha, token ou segredo aqui -- só o texto da
+/// mensagem.
+model ClaimMessage {
+  id           String          @id @default(uuid()) @db.Uuid
+  claimId      String          @map("reclamacao_id") @db.Uuid
+  authorUserId String          @map("autor_usuario_id") @db.Uuid
+  authorRole   ClaimAuthorRole @map("autor_papel")
+  body         String          @map("mensagem")
+  createdAt    DateTime        @default(now()) @map("criado_em")
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@map("reclamacao_mensagens")
+  @@schema("orders")
+}
+
+/// Metadados de um arquivo anexado a uma Claim -- NUNCA o arquivo em si.
+/// storageKey é só a chave no bucket (Supabase Storage, infraestrutura
+/// ainda NÃO implementada nesta rodada -- ver pedido original, item 7);
+/// nunca guardamos signed URL (expira, não deveria persistir) nem
+/// binário/base64 no Postgres. uploadedByRole replica o mesmo raciocínio
+/// de ClaimMessage.authorRole -- adição não pedida explicitamente na
+/// lista original de campos, mas direta e simétrica; sinalizada no
+/// relatório desta rodada como decisão própria.
+model ClaimEvidence {
+  id               String          @id @default(uuid()) @db.Uuid
+  claimId          String          @map("reclamacao_id") @db.Uuid
+  uploadedByUserId String          @map("enviado_por_usuario_id") @db.Uuid
+  uploadedByRole   ClaimAuthorRole @map("enviado_por_papel")
+  storageKey       String          @map("chave_armazenamento")
+  fileName         String          @map("nome_arquivo")
+  mimeType         String          @map("tipo_mime")
+  sizeBytes        Int             @map("tamanho_bytes")
+  createdAt        DateTime        @default(now()) @map("criado_em")
+
+  claim Claim @relation(fields: [claimId], references: [id], onDelete: Cascade)
+
+  @@index([claimId])
+  @@map("reclamacao_evidencias")
+  @@schema("orders")
+}
+
+/// Uma tentativa de envio físico de volta ao vendedor -- separada de
+/// Return de propósito (1:N, nunca @@unique em returnId): uma tentativa
+/// perdida pelo transportador gera uma SEGUNDA linha aqui, não uma
+/// atualização confusa da primeira (ver enum ReturnShipmentStatus).
+/// Nenhuma integração real de transportador nesta rodada -- carrier/
+/// trackingCode são texto livre informado pelo cliente, não uma consulta
+/// de rastreio de verdade.
+model ReturnShipment {
+  id           String               @id @default(uuid()) @db.Uuid
+  returnId     String               @map("devolucao_id") @db.Uuid
+  carrier      String?              @map("transportadora")
+  trackingCode String?              @map("codigo_rastreio")
+  status       ReturnShipmentStatus @default(PENDING)
+  postedAt     DateTime?            @map("postado_em")
+  receivedAt   DateTime?            @map("recebido_em")
+  createdAt    DateTime             @default(now()) @map("criado_em")
+  updatedAt    DateTime             @updatedAt @map("atualizado_em")
+
+  returnRequest Return @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  @@index([returnId])
+  @@index([status])
+  @@map("devolucao_envios")
+  @@schema("orders")
+}
+
+/// Mediação formal -- só existe quando há desacordo real, nasce de uma
+/// Claim OU de uma Return contestada, nunca das duas ao mesmo tempo
+/// (CHECK manual na migration, mesmo padrão de todo CHECK deste schema:
+/// exatamente um de claimId/returnId precisa estar preenchido). outcome
+/// fica deliberadamente separado de status (DisputeStatus = fase,
+/// outcome = quem ganhou) e nullable enquanto a disputa está aberta -- o
+/// outcome "oficial" mora aqui (resumo rápido sem precisar olhar
+/// histórico), mas cada decisão individual é preservada em
+/// DisputeDecision (1:N, nunca sobrescrita) para auditoria.
+///
+/// claim/return usam onDelete: Restrict, NUNCA SetNull -- achado na
+/// revisão contra o SQL oficial do Prisma: SetNull deixaria claimId=NULL
+/// E returnId=NULL ao apagar a origem, violando o próprio
+/// disputas_origem_unica_check (exige exatamente uma origem). Restrict
+/// também preserva histórico/auditoria -- a origem de uma disputa
+/// existente nunca pode ser apagada. Claim.returnId (não aqui) continua
+/// SetNull de propósito -- não há CHECK em Claim exigindo returnId.
+model Dispute {
+  id         String          @id @default(uuid()) @db.Uuid
+  claimId    String?         @unique @map("reclamacao_id") @db.Uuid
+  returnId   String?         @unique @map("devolucao_id") @db.Uuid
+  status     DisputeStatus   @default(OPEN)
+  outcome    DisputeOutcome?
+  openedAt   DateTime        @default(now()) @map("aberta_em")
+  resolvedAt DateTime?       @map("resolvida_em")
+  closedAt   DateTime?       @map("fechada_em")
+
+  claim     Claim?            @relation(fields: [claimId], references: [id], onDelete: Restrict)
+  return    Return?           @relation(fields: [returnId], references: [id], onDelete: Restrict)
+  decisions DisputeDecision[]
+
+  @@index([status])
+  @@map("disputas")
+  @@schema("orders")
+}
+
+/// Histórico de decisões administrativas de uma Dispute -- 1:N de
+/// propósito (NÃO @@unique em disputeId): "não sobrescrever decisões
+/// antigas se futuramente precisarmos de histórico" (pedido original,
+/// item 11). A decisão "atual" mora em Dispute.outcome/status; esta
+/// tabela é o log completo de quem decidiu o quê e quando, inclusive se
+/// uma decisão futura for revista.
+model DisputeDecision {
+  id              String         @id @default(uuid()) @db.Uuid
+  disputeId       String         @map("disputa_id") @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios -- sem FK cross-schema.
+  decidedByUserId String         @map("decidido_por_usuario_id") @db.Uuid
+  outcome         DisputeOutcome
+  reason          String         @map("motivo")
+  createdAt       DateTime       @default(now()) @map("criado_em")
+
+  dispute Dispute @relation(fields: [disputeId], references: [id], onDelete: Restrict)
+
+  @@index([disputeId])
+  @@map("decisoes_disputa")
   @@schema("orders")
 }
 

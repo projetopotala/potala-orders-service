@@ -171,7 +171,27 @@ export class ReturnsService {
       throw new ConflictException('This return has already been decided');
     }
 
-    return this.prisma.return.update({ where: { id }, data: { status } });
+    // CAS: menor correção possível pro mesmo achado de race condition
+    // (rodada de auditoria) -- o update antigo (where só por id) não
+    // reconfirmava REQUESTED no momento da escrita, então uma
+    // DisputesService.openFromReturnOrigin concorrente podia mover esta
+    // Return pra CONTESTED entre a leitura acima e este update, e este
+    // update sobrescreveria CONTESTED de volta pra APPROVED/REJECTED
+    // silenciosamente. updateMany com REQUESTED na própria WHERE relê e
+    // escreve como uma única operação atômica do banco; count === 0
+    // significa que a Return não está mais REQUESTED (decidida ou
+    // contestada concorrentemente) -- mesmo 409 que o caso já tratado
+    // acima, nenhum outro comportamento deste método foi alterado.
+    const result = await this.prisma.return.updateMany({
+      where: { id, status: ReturnStatus.REQUESTED },
+      data: { status },
+    });
+
+    if (result.count === 0) {
+      throw new ConflictException('This return has already been decided');
+    }
+
+    return this.prisma.return.findUnique({ where: { id } });
   }
 
   /** P2002 on the orderItemId @unique — a race with the pre-check above, same shape as ReviewsService.isReviewConflict. */

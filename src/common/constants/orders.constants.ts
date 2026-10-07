@@ -47,3 +47,12 @@ export const MAX_PERCENT_DISCOUNT = 100;
 // --- Devoluções (Fase E do roadmap pós-entrega adiantada -- ver roadmap-mercado-livre.md, seção 3) ---
 export const MAX_RETURN_REASON_LENGTH = 200;
 export const MAX_RETURN_DESCRIPTION_LENGTH = 2000;
+
+// --- Pós-venda: Claims/Disputes (fundação P0, ver claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md) ---
+export const MAX_CLAIM_REASON_LENGTH = 200;
+export const MAX_CLAIM_DESCRIPTION_LENGTH = 2000;
+export const MAX_CLAIM_MESSAGE_LENGTH = 4000;
+export const MAX_CLAIM_EVIDENCE_FILE_NAME_LENGTH = 255;
+export const MAX_CLAIM_EVIDENCE_MIME_TYPE_LENGTH = 100;
+export const MAX_CLAIM_EVIDENCE_STORAGE_KEY_LENGTH = 1000;
+export const MAX_DISPUTE_DECISION_REASON_LENGTH = 2000;

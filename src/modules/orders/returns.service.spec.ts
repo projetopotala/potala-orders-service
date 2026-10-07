@@ -98,6 +98,75 @@ describe('ReturnsService', () => {
     });
   });
 
+  describe('decide — CAS contra decisão/contestação concorrente (achado da auditoria de race condition)', () => {
+    const RETURN_ID = '00000000-0000-4000-8000-00000000d001';
+
+    it('APPROVED a partir de REQUESTED -> PASS', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findUnique.mockResolvedValue({
+        id: RETURN_ID,
+        status: 'REQUESTED',
+      });
+      prisma.return.updateMany.mockResolvedValue({ count: 1 });
+      const service = new ReturnsService(prisma as never);
+
+      await service.decide(RETURN_ID, 'APPROVED' as never);
+
+      // CAS: a WHERE do updateMany reconfirma REQUESTED além do id --
+      // mesmo princípio de ClaimsService.transitionStatus/addMessage e
+      // DisputesService.openFromClaimOrigin/openFromReturnOrigin.
+      expect(prisma.return.updateMany).toHaveBeenCalledWith({
+        where: { id: RETURN_ID, status: 'REQUESTED' },
+        data: { status: 'APPROVED' },
+      });
+    });
+
+    it('404s when the return does not exist', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findUnique.mockResolvedValue(null);
+      const service = new ReturnsService(prisma as never);
+
+      await expect(
+        service.decide(RETURN_ID, 'APPROVED' as never),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(prisma.return.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects with 409 when already decided (pre-check de leitura, comportamento preservado)', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findUnique.mockResolvedValue({
+        id: RETURN_ID,
+        status: 'APPROVED',
+      });
+      const service = new ReturnsService(prisma as never);
+
+      await expect(
+        service.decide(RETURN_ID, 'REJECTED' as never),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(prisma.return.updateMany).not.toHaveBeenCalled();
+    });
+
+    // Race condition (achado da auditoria desta rodada): a Return deixa de
+    // estar REQUESTED ENTRE a leitura (findUnique) e o commit do CAS --
+    // por exemplo, DisputesService.openFromReturnOrigin movendo-a pra
+    // CONTESTED nesse intervalo. Sem o CAS, o update antigo (where só por
+    // id) sobrescreveria CONTESTED de volta pra APPROVED/REJECTED
+    // silenciosamente.
+    it('detecta a Return saindo de REQUESTED entre leitura e commit (CAS count=0) -- não sobrescreve CONTESTED/outra decisão concorrente', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findUnique.mockResolvedValue({
+        id: RETURN_ID,
+        status: 'REQUESTED',
+      });
+      prisma.return.updateMany.mockResolvedValue({ count: 0 });
+      const service = new ReturnsService(prisma as never);
+
+      await expect(
+        service.decide(RETURN_ID, 'APPROVED' as never),
+      ).rejects.toBeInstanceOf(ConflictException);
+    });
+  });
+
   describe('createReturn — other existing rules preserved', () => {
     it('rejects a second return request for the same item with 409, even when DELIVERED', async () => {
       const prisma = createPrismaMock();
