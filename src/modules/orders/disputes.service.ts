@@ -278,6 +278,78 @@ export class DisputesService {
     return dispute;
   }
 
+  /**
+   * Projeção explícita pra CUSTOMER/SELLER -- usada por getForCustomer e
+   * getForSeller abaixo. Difere de getForAdmin (que usa `include: {
+   * decisions: true }`, objeto completo) de propósito: exclui
+   * DisputeDecision.decidedByUserId (identificador administrativo interno,
+   * pedido explícito desta rodada: "especialmente identificadores
+   * administrativos que não precisam ser exibidos ao cliente"). O
+   * histórico completo de decisões já fica disponível aqui -- é só este
+   * campo específico que nunca aparece fora de getForAdmin.
+   */
+  private static readonly TENANT_FACING_SELECT = {
+    id: true,
+    claimId: true,
+    returnId: true,
+    status: true,
+    outcome: true,
+    openedAt: true,
+    resolvedAt: true,
+    closedAt: true,
+    decisions: {
+      select: {
+        outcome: true,
+        reason: true,
+        createdAt: true,
+      },
+    },
+  } satisfies Prisma.DisputeSelect;
+
+  /**
+   * CUSTOMER -- Dispute não tem coluna customerId própria (ver model
+   * Dispute em schema.prisma), então o ownership é verificado atravessando
+   * as relações claim/return DIRETO NA QUERY (OR entre as duas origens
+   * possíveis), nunca "buscar por id e filtrar depois": uma Dispute de
+   * outro customer, ou sem nenhuma relação com este customer, bate em
+   * nenhuma linha e cai no mesmo 404 de uma Dispute inexistente --
+   * indistinguíveis de propósito. Mesmo raciocínio de
+   * ClaimsService.getForCustomer/getForSeller e do restante deste módulo.
+   */
+  async getForCustomer(customerId: string, disputeId: string) {
+    const dispute = await this.prisma.dispute.findFirst({
+      where: {
+        id: disputeId,
+        OR: [{ claim: { customerId } }, { return: { customerId } }],
+      },
+      select: DisputesService.TENANT_FACING_SELECT,
+    });
+    if (!dispute) {
+      throw new NotFoundException('Dispute not found');
+    }
+    return dispute;
+  }
+
+  /**
+   * SELLER -- espelha getForCustomer acima. Atenção explícita desta
+   * rodada: uma Dispute pode ter origem numa Claim OU numa Return, e o
+   * seller da loja precisa alcançar as duas (daí o OR cobrindo claim.
+   * sellerId e return.sellerId, não só uma das origens).
+   */
+  async getForSeller(sellerId: string, disputeId: string) {
+    const dispute = await this.prisma.dispute.findFirst({
+      where: {
+        id: disputeId,
+        OR: [{ claim: { sellerId } }, { return: { sellerId } }],
+      },
+      select: DisputesService.TENANT_FACING_SELECT,
+    });
+    if (!dispute) {
+      throw new NotFoundException('Dispute not found');
+    }
+    return dispute;
+  }
+
   async listForAdmin(actor: PostSaleActor, query: PaginationQueryDto = {}) {
     this.assertAdmin(actor);
 

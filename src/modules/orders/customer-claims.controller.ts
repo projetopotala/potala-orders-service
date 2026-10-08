@@ -236,4 +236,22 @@ export class CustomerClaimsController {
   ) {
     return this.disputesService.openFromReturn(this.buildActor(user), id);
   }
+
+  @Get('disputes/:id')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({
+    summary:
+      'Fetches a dispute the authenticated customer is a party to (originated from either their own Claim or Return).',
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      "Dispute does not exist, or its originating Claim/Return does not belong to this customer (never distinguished from the caller's perspective).",
+  })
+  async getDispute(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.disputesService.getForCustomer(user.id, id);
+  }
 }

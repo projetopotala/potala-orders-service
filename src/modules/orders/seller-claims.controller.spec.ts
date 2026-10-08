@@ -44,6 +44,7 @@ describe('SellerClaimsController', () => {
     const disputesService = {
       openFromClaim: jest.fn(),
       openFromReturn: jest.fn(),
+      getForSeller: jest.fn(),
     } as unknown as jest.Mocked<DisputesService>;
 
     const controller = new SellerClaimsController(
@@ -114,6 +115,16 @@ describe('SellerClaimsController', () => {
     );
   });
 
+  it('getDispute() scopes to the authenticated store via seller.sellerId (dispute originated from either Claim or Return)', async () => {
+    const DISPUTE_ID = '00000000-0000-4000-8000-000000002006';
+    const { controller, disputesService } = buildController();
+    await controller.getDispute(SELLER_CONTEXT, DISPUTE_ID);
+    expect(disputesService.getForSeller).toHaveBeenCalledWith(
+      SELLER_ID,
+      DISPUTE_ID,
+    );
+  });
+
   /**
    * CRÍTICO (pedido explícito de Arthur): SELLER não tem transição
    * manual de status de Claim -- nenhuma rota resolve/cancel/escalate/
@@ -141,6 +152,7 @@ describe('SellerClaimsController', () => {
         'addEvidence',
         'openDisputeFromClaim',
         'openDisputeFromReturn',
+        'getDispute',
       ].sort(),
     );
   });
@@ -160,6 +172,11 @@ describe('SellerClaimsController', () => {
   describe('ParseUUIDPipe on :id routes (HTTP)', () => {
     let app: INestApplication | undefined;
     let claimsService: jest.Mocked<ClaimsService>;
+    let disputesServiceMock: {
+      openFromClaim: jest.Mock;
+      openFromReturn: jest.Mock;
+      getForSeller: jest.Mock;
+    };
 
     beforeEach(async () => {
       claimsService = {
@@ -168,6 +185,11 @@ describe('SellerClaimsController', () => {
         addMessage: jest.fn(),
         addEvidence: jest.fn(),
       } as unknown as jest.Mocked<ClaimsService>;
+      disputesServiceMock = {
+        openFromClaim: jest.fn(),
+        openFromReturn: jest.fn(),
+        getForSeller: jest.fn().mockResolvedValue({ id: 'dispute-1' }),
+      };
 
       const moduleRef = await Test.createTestingModule({
         controllers: [SellerClaimsController],
@@ -175,7 +197,11 @@ describe('SellerClaimsController', () => {
           { provide: ClaimsService, useValue: claimsService },
           {
             provide: DisputesService,
-            useValue: { openFromClaim: jest.fn(), openFromReturn: jest.fn() },
+            useValue: {
+              openFromClaim: jest.fn(),
+              openFromReturn: jest.fn(),
+              getForSeller: disputesServiceMock.getForSeller,
+            },
           },
         ],
       })
@@ -223,6 +249,30 @@ describe('SellerClaimsController', () => {
       expect(claimsService.getForSeller).toHaveBeenCalledWith(
         SELLER_ID,
         CLAIM_ID,
+      );
+    });
+
+    it('rejects a non-UUID dispute id with 400 on /seller/disputes/:id', async () => {
+      if (!app) {
+        throw new Error('app was not initialized');
+      }
+      await request(app.getHttpServer())
+        .get('/seller/disputes/not-a-uuid')
+        .expect(400);
+      expect(disputesServiceMock.getForSeller).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid UUID dispute id on /seller/disputes/:id and reaches the service', async () => {
+      if (!app) {
+        throw new Error('app was not initialized');
+      }
+      const DISPUTE_ID = '00000000-0000-4000-8000-000000002006';
+      await request(app.getHttpServer())
+        .get(`/seller/disputes/${DISPUTE_ID}`)
+        .expect(200);
+      expect(disputesServiceMock.getForSeller).toHaveBeenCalledWith(
+        SELLER_ID,
+        DISPUTE_ID,
       );
     });
   });

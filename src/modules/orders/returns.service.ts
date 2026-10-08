@@ -115,6 +115,15 @@ export class ReturnsService {
             },
           },
         },
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
       },
       orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
     });
@@ -150,11 +159,103 @@ export class ReturnsService {
             },
           },
         },
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
       },
       orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
     });
 
     return buildPage(rows, limit);
+  }
+
+  /**
+   * SELLER -- mesmo raciocínio de listForCustomer acima, filtrado pelo
+   * sellerId autenticado em vez do customerId. Nunca retorna Returns de
+   * outra loja, mesmo quando compartilham o mesmo Order (um Order pode
+   * ter SellerOrders de lojas diferentes) -- o filtro é sempre na própria
+   * query SQL, nunca "buscar tudo e filtrar depois".
+   */
+  async listForSeller(sellerId: string, query: PaginationQueryDto = {}) {
+    const { limit, cursor } = resolvePagination(query);
+
+    await requireCursor(cursor, async (id) => {
+      const returnRequest = await this.prisma.return.findFirst({
+        where: { id, sellerId },
+        select: { id: true },
+      });
+      return returnRequest !== null;
+    });
+
+    const rows = await this.prisma.return.findMany({
+      ...prismaIdCursorArgs(limit, cursor),
+      where: { sellerId },
+      include: {
+        orderItem: {
+          select: {
+            productTitle: true,
+            sellerOrder: {
+              select: { order: { select: { orderNumber: true } } },
+            },
+          },
+        },
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
+      orderBy: PAGINATION_ORDER_CREATED_AT_ID_DESC,
+    });
+
+    return buildPage(rows, limit);
+  }
+
+  /**
+   * Detalhe tenant-scoped pro SELLER -- mesmo raciocínio de ownership
+   * em SQL já usado em todo o módulo (404 indistinguível pra Return de
+   * outra loja ou inexistente, nunca 403). Não cria nenhuma operação de
+   * aprovação/rejeição pro SELLER aqui -- decisões de Return continuam
+   * exclusivamente com ADMIN (ver ReturnsService.decide), este método é
+   * somente leitura.
+   */
+  async getForSeller(sellerId: string, id: string) {
+    const returnRequest = await this.prisma.return.findFirst({
+      where: { id, sellerId },
+      include: {
+        orderItem: {
+          select: {
+            productTitle: true,
+            sellerOrder: {
+              select: { order: { select: { orderNumber: true } } },
+            },
+          },
+        },
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
+    });
+    if (!returnRequest) {
+      throw new NotFoundException('Return not found');
+    }
+    return returnRequest;
   }
 
   /**

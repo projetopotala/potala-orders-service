@@ -206,7 +206,19 @@ export class ClaimsService {
   async getForCustomer(customerId: string, claimId: string) {
     const claim = await this.prisma.claim.findFirst({
       where: { id: claimId, customerId },
-      include: { messages: true, evidence: true },
+      include: {
+        messages: true,
+        evidence: true,
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
     });
     if (!claim) {
       throw new NotFoundException('Claim not found');
@@ -238,7 +250,19 @@ export class ClaimsService {
   async getForSeller(sellerId: string, claimId: string) {
     const claim = await this.prisma.claim.findFirst({
       where: { id: claimId, sellerId },
-      include: { messages: true, evidence: true },
+      include: {
+        messages: true,
+        evidence: true,
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
     });
     if (!claim) {
       throw new NotFoundException('Claim not found');
@@ -278,7 +302,19 @@ export class ClaimsService {
 
     const claim = await this.prisma.claim.findFirst({
       where: { id: claimId },
-      include: { messages: true, evidence: true },
+      include: {
+        messages: true,
+        evidence: true,
+        dispute: {
+          select: {
+            id: true,
+            status: true,
+            outcome: true,
+            openedAt: true,
+            resolvedAt: true,
+          },
+        },
+      },
     });
     if (!claim) {
       throw new NotFoundException('Claim not found');

@@ -27,6 +27,7 @@ export type PrismaMock = {
     create: MockFn;
     findUnique: MockFn;
     findFirst: MockFn;
+    findMany: MockFn;
     update: MockFn;
     updateMany: MockFn;
   };
@@ -102,6 +103,7 @@ export function createPrismaMock(): PrismaMock & PrismaService {
       create: jest.fn(),
       findUnique: jest.fn(),
       findFirst: jest.fn(),
+      findMany: jest.fn(),
       update: jest.fn(),
       // Default: CAS 'succeeds' ({ count: 1 }) unless a test overrides it to
       // simulate a concurrent status change ({ count: 0 }) -- see

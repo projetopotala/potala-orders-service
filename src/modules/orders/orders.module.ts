@@ -3,6 +3,7 @@ import { OrdersController } from './orders.controller';
 import { CustomerClaimsController } from './customer-claims.controller';
 import { SellerOrdersController } from './seller-orders.controller';
 import { SellerClaimsController } from './seller-claims.controller';
+import { SellerReturnsController } from './seller-returns.controller';
 import { AdminClaimsController } from './admin-claims.controller';
 import { AdminDisputesController } from './admin-disputes.controller';
 import { AdminOrdersController } from './admin-orders.controller';
@@ -63,6 +64,7 @@ import { PaymentsModule } from '../payments/payments.module';
     OrdersController,
     SellerOrdersController,
     SellerClaimsController,
+    SellerReturnsController,
     AdminOrdersController,
     SellerReviewsController,
     PublicReviewsController,

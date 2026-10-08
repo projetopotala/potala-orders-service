@@ -23,6 +23,7 @@ const DISPUTE_ID = '00000000-0000-4000-8000-000000008001';
 const CUSTOMER_ID = '00000000-0000-4000-8000-000000000c01';
 const OTHER_CUSTOMER_ID = '00000000-0000-4000-8000-000000000c02';
 const SELLER_ID = '00000000-0000-4000-8000-00000000a003';
+const OTHER_SELLER_ID = '00000000-0000-4000-8000-00000000a099';
 const ADMIN_USER_ID = '00000000-0000-4000-8000-000000000a01';
 
 const CUSTOMER_ACTOR: PostSaleActor = {
@@ -471,6 +472,147 @@ describe('DisputesService', () => {
         service.getForAdmin(CUSTOMER_ACTOR, DISPUTE_ID),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(prisma.dispute.findFirst).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getForCustomer/getForSeller — tenant-scoped via relações claim/return, já que Dispute não tem customerId/sellerId próprios (nova rodada: leituras de disputa)', () => {
+    function tenantDisputeRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: DISPUTE_ID,
+        claimId: null,
+        returnId: null,
+        status: DisputeStatus.OPEN,
+        outcome: null,
+        openedAt: new Date('2026-01-01'),
+        resolvedAt: null,
+        closedAt: null,
+        decisions: [],
+        ...overrides,
+      };
+    }
+
+    describe('getForCustomer', () => {
+      it('lê uma dispute originada da própria Claim do customer', async () => {
+        const row = tenantDisputeRow({ claimId: CLAIM_ID });
+        prisma.dispute.findFirst.mockResolvedValue(row);
+
+        const result = await service.getForCustomer(CUSTOMER_ID, DISPUTE_ID);
+
+        expect(prisma.dispute.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              id: DISPUTE_ID,
+              OR: [
+                { claim: { customerId: CUSTOMER_ID } },
+                { return: { customerId: CUSTOMER_ID } },
+              ],
+            },
+          }),
+        );
+        expect(result).toEqual(row);
+      });
+
+      it('lê uma dispute originada da própria Return do customer', async () => {
+        const row = tenantDisputeRow({ returnId: RETURN_ID });
+        prisma.dispute.findFirst.mockResolvedValue(row);
+
+        const result = await service.getForCustomer(CUSTOMER_ID, DISPUTE_ID);
+
+        expect(result).toEqual(row);
+      });
+
+      it('404s para uma dispute de outro customer (o OR na própria query não bate em nenhuma linha)', async () => {
+        prisma.dispute.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.getForCustomer(OTHER_CUSTOMER_ID, DISPUTE_ID),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it('404s para uma dispute inexistente -- indistinguível do caso de outro tenant, de propósito', async () => {
+        prisma.dispute.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.getForCustomer(CUSTOMER_ID, DISPUTE_ID),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it('expõe os dados da decisão quando a dispute já foi resolvida, sem decidedByUserId (identificador administrativo)', async () => {
+        const row = tenantDisputeRow({
+          claimId: CLAIM_ID,
+          status: DisputeStatus.RESOLVED,
+          outcome: DisputeOutcome.CUSTOMER_FAVORED,
+          resolvedAt: new Date('2026-02-01'),
+          decisions: [
+            {
+              outcome: DisputeOutcome.CUSTOMER_FAVORED,
+              reason: 'Produto comprovadamente com defeito.',
+              createdAt: new Date('2026-02-01'),
+            },
+          ],
+        });
+        prisma.dispute.findFirst.mockResolvedValue(row);
+
+        const result = await service.getForCustomer(CUSTOMER_ID, DISPUTE_ID);
+
+        expect(result.decisions).toEqual(row.decisions);
+        expect(prisma.dispute.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            select: expect.objectContaining({
+              decisions: {
+                select: { outcome: true, reason: true, createdAt: true },
+              },
+            }),
+          }),
+        );
+      });
+    });
+
+    describe('getForSeller', () => {
+      it('lê uma dispute de Claim da própria loja', async () => {
+        const row = tenantDisputeRow({ claimId: CLAIM_ID });
+        prisma.dispute.findFirst.mockResolvedValue(row);
+
+        const result = await service.getForSeller(SELLER_ID, DISPUTE_ID);
+
+        expect(prisma.dispute.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: {
+              id: DISPUTE_ID,
+              OR: [
+                { claim: { sellerId: SELLER_ID } },
+                { return: { sellerId: SELLER_ID } },
+              ],
+            },
+          }),
+        );
+        expect(result).toEqual(row);
+      });
+
+      it('lê uma dispute de Return da própria loja', async () => {
+        const row = tenantDisputeRow({ returnId: RETURN_ID });
+        prisma.dispute.findFirst.mockResolvedValue(row);
+
+        const result = await service.getForSeller(SELLER_ID, DISPUTE_ID);
+
+        expect(result).toEqual(row);
+      });
+
+      it('não alcança a dispute de outra loja', async () => {
+        prisma.dispute.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.getForSeller(OTHER_SELLER_ID, DISPUTE_ID),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
+
+      it('404s para uma dispute inexistente', async () => {
+        prisma.dispute.findFirst.mockResolvedValue(null);
+
+        await expect(
+          service.getForSeller(SELLER_ID, DISPUTE_ID),
+        ).rejects.toBeInstanceOf(NotFoundException);
+      });
     });
   });
 

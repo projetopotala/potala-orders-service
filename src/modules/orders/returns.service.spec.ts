@@ -1,4 +1,8 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { ReturnsService } from './returns.service';
 import { createPrismaMock } from '../../test-utils/prisma.mock';
@@ -219,6 +223,184 @@ describe('ReturnsService', () => {
       await expect(
         service.createReturn(CUSTOMER_ID, ORDER_ID, ORDER_ITEM_ID, returnDto()),
       ).rejects.toBe(unrelatedError);
+    });
+  });
+
+  describe('listForCustomer / listForAdmin — dispute summary (additive, não quebra o contrato anterior)', () => {
+    const RETURN_ID = '00000000-0000-4000-8000-00000000d002';
+
+    it('listForCustomer inclui o resumo da dispute no include do Prisma e o propaga no retorno', async () => {
+      const prisma = createPrismaMock();
+      const disputeSummary = {
+        id: 'dispute-1',
+        status: 'OPEN',
+        outcome: null,
+        openedAt: new Date('2026-01-01'),
+        resolvedAt: null,
+      };
+      prisma.return.findMany.mockResolvedValue([
+        { id: RETURN_ID, dispute: disputeSummary },
+      ]);
+      const service = new ReturnsService(prisma as never);
+
+      const result = await service.listForCustomer(CUSTOMER_ID);
+
+      expect(prisma.return.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { customerId: CUSTOMER_ID },
+          include: expect.objectContaining({
+            dispute: {
+              select: {
+                id: true,
+                status: true,
+                outcome: true,
+                openedAt: true,
+                resolvedAt: true,
+              },
+            },
+          }),
+        }),
+      );
+      expect(result.items[0].dispute).toEqual(disputeSummary);
+    });
+
+    it('listForAdmin inclui o mesmo resumo da dispute no include do Prisma', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findMany.mockResolvedValue([]);
+      const service = new ReturnsService(prisma as never);
+
+      await service.listForAdmin();
+
+      expect(prisma.return.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            dispute: {
+              select: {
+                id: true,
+                status: true,
+                outcome: true,
+                openedAt: true,
+                resolvedAt: true,
+              },
+            },
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('listForSeller — isolamento por tenant + paginação (nova rodada: leituras do SELLER para Returns)', () => {
+    const RETURN_ID = '00000000-0000-4000-8000-00000000d003';
+
+    it('filtra exclusivamente pelo sellerId autenticado na própria query SQL, nunca "buscar tudo e filtrar depois"', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findMany.mockResolvedValue([
+        { id: RETURN_ID, sellerId: SELLER_ID },
+      ]);
+      const service = new ReturnsService(prisma as never);
+
+      await service.listForSeller(SELLER_ID);
+
+      expect(prisma.return.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { sellerId: SELLER_ID } }),
+      );
+    });
+
+    it('pagina via cursor usando o mesmo helper de toda a base (prismaIdCursorArgs)', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findFirst.mockResolvedValue({ id: RETURN_ID });
+      prisma.return.findMany.mockResolvedValue([]);
+      const service = new ReturnsService(prisma as never);
+
+      await service.listForSeller(SELLER_ID, { cursor: RETURN_ID, limit: 5 });
+
+      expect(prisma.return.findFirst).toHaveBeenCalledWith({
+        where: { id: RETURN_ID, sellerId: SELLER_ID },
+        select: { id: true },
+      });
+      expect(prisma.return.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          take: 6,
+          skip: 1,
+          cursor: { id: RETURN_ID },
+        }),
+      );
+    });
+
+    it('um cursor que não pertence a esta loja (de outro tenant, ou inexistente) é rejeitado -- nunca alcança outra loja através do cursor', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findFirst.mockResolvedValue(null);
+      const service = new ReturnsService(prisma as never);
+
+      await expect(
+        service.listForSeller(SELLER_ID, { cursor: RETURN_ID }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.return.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getForSeller — detalhe tenant-scoped + vínculo de disputa (nova rodada)', () => {
+    const RETURN_ID = '00000000-0000-4000-8000-00000000d004';
+
+    it('retorna o detalhe quando a Return pertence à loja autenticada', async () => {
+      const prisma = createPrismaMock();
+      const row = { id: RETURN_ID, sellerId: SELLER_ID, dispute: null };
+      prisma.return.findFirst.mockResolvedValue(row);
+      const service = new ReturnsService(prisma as never);
+
+      const result = await service.getForSeller(SELLER_ID, RETURN_ID);
+
+      expect(prisma.return.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: RETURN_ID, sellerId: SELLER_ID },
+        }),
+      );
+      expect(result).toEqual(row);
+    });
+
+    it('404s quando a Return pertence a outra loja (ou não existe) -- indistinguível de propósito', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findFirst.mockResolvedValue(null);
+      const service = new ReturnsService(prisma as never);
+
+      await expect(
+        service.getForSeller(SELLER_ID, RETURN_ID),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('expõe o vínculo de disputa (resumo) quando a Return já foi contestada', async () => {
+      const prisma = createPrismaMock();
+      const dispute = {
+        id: 'dispute-1',
+        status: 'OPEN',
+        outcome: null,
+        openedAt: new Date('2026-01-01'),
+        resolvedAt: null,
+      };
+      prisma.return.findFirst.mockResolvedValue({
+        id: RETURN_ID,
+        sellerId: SELLER_ID,
+        dispute,
+      });
+      const service = new ReturnsService(prisma as never);
+
+      const result = await service.getForSeller(SELLER_ID, RETURN_ID);
+
+      expect(result.dispute).toEqual(dispute);
+    });
+
+    it('retorna dispute: null quando a Return nunca foi contestada', async () => {
+      const prisma = createPrismaMock();
+      prisma.return.findFirst.mockResolvedValue({
+        id: RETURN_ID,
+        sellerId: SELLER_ID,
+        dispute: null,
+      });
+      const service = new ReturnsService(prisma as never);
+
+      const result = await service.getForSeller(SELLER_ID, RETURN_ID);
+
+      expect(result.dispute).toBeNull();
     });
   });
 });

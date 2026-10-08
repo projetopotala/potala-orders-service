@@ -179,4 +179,22 @@ export class SellerClaimsController {
   ) {
     return this.disputesService.openFromReturn(this.buildActor(seller), id);
   }
+
+  @Get('disputes/:id')
+  @ApiParam({ name: 'id', format: 'uuid' })
+  @ApiOperation({
+    summary:
+      "Fetches a dispute the authenticated store is a party to (originated from either the store's own Claim or Return).",
+  })
+  @ApiResponse({
+    status: 404,
+    description:
+      "Dispute does not exist, or its originating Claim/Return does not belong to this store (never distinguished from the caller's perspective).",
+  })
+  async getDispute(
+    @CurrentSeller() seller: SellerContext,
+    @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+  ) {
+    return this.disputesService.getForSeller(seller.sellerId, id);
+  }
 }

@@ -44,6 +44,7 @@ describe('CustomerClaimsController', () => {
     const disputesService = {
       openFromClaim: jest.fn(),
       openFromReturn: jest.fn(),
+      getForCustomer: jest.fn(),
     } as unknown as jest.Mocked<DisputesService>;
 
     const controller = new CustomerClaimsController(
@@ -146,9 +147,24 @@ describe('CustomerClaimsController', () => {
     );
   });
 
+  it('getDispute() scopes to the authenticated customer via user.id (dispute originated from either Claim or Return)', async () => {
+    const DISPUTE_ID = '00000000-0000-4000-8000-000000001006';
+    const { controller, disputesService } = buildController();
+    await controller.getDispute(CUSTOMER_USER, DISPUTE_ID);
+    expect(disputesService.getForCustomer).toHaveBeenCalledWith(
+      USER_ID,
+      DISPUTE_ID,
+    );
+  });
+
   describe('ParseUUIDPipe on :id routes (HTTP)', () => {
     let app: INestApplication;
     let claimsService: jest.Mocked<ClaimsService>;
+    let disputesServiceMock: {
+      openFromClaim: jest.Mock;
+      openFromReturn: jest.Mock;
+      getForCustomer: jest.Mock;
+    };
 
     beforeEach(async () => {
       claimsService = {
@@ -159,6 +175,11 @@ describe('CustomerClaimsController', () => {
         addEvidence: jest.fn(),
         transitionStatus: jest.fn(),
       } as unknown as jest.Mocked<ClaimsService>;
+      disputesServiceMock = {
+        openFromClaim: jest.fn(),
+        openFromReturn: jest.fn(),
+        getForCustomer: jest.fn().mockResolvedValue({ id: 'dispute-1' }),
+      };
 
       const moduleRef = await Test.createTestingModule({
         controllers: [CustomerClaimsController],
@@ -166,7 +187,11 @@ describe('CustomerClaimsController', () => {
           { provide: ClaimsService, useValue: claimsService },
           {
             provide: DisputesService,
-            useValue: { openFromClaim: jest.fn(), openFromReturn: jest.fn() },
+            useValue: {
+              openFromClaim: jest.fn(),
+              openFromReturn: jest.fn(),
+              getForCustomer: disputesServiceMock.getForCustomer,
+            },
           },
         ],
       }).compile();
@@ -212,6 +237,24 @@ describe('CustomerClaimsController', () => {
         .send({ reason: 'x' })
         .expect(400);
       expect(claimsService.createClaim).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-UUID dispute id with 400 on /orders/disputes/:id', async () => {
+      await request(app.getHttpServer())
+        .get('/orders/disputes/not-a-uuid')
+        .expect(400);
+      expect(disputesServiceMock.getForCustomer).not.toHaveBeenCalled();
+    });
+
+    it('accepts a valid UUID dispute id on /orders/disputes/:id and reaches the service', async () => {
+      const DISPUTE_ID = '00000000-0000-4000-8000-000000001006';
+      await request(app.getHttpServer())
+        .get(`/orders/disputes/${DISPUTE_ID}`)
+        .expect(200);
+      expect(disputesServiceMock.getForCustomer).toHaveBeenCalledWith(
+        USER_ID,
+        DISPUTE_ID,
+      );
     });
   });
 });
