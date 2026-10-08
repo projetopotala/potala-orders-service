@@ -181,7 +181,7 @@ export class OrdersController {
   @ApiParam({ name: 'itemId', format: 'uuid' })
   @ApiOperation({
     summary:
-      "Reviews one of the authenticated customer's own order items — one review per item, only after the seller has confirmed the order.",
+      "Reviews one of the authenticated customer's own order items — one review per item, only once the order has been delivered.",
   })
   @ApiResponse({ status: HttpStatus.CREATED, description: 'Review created.' })
   @ApiResponse({
@@ -191,7 +191,7 @@ export class OrdersController {
   })
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'Seller order is not yet CONFIRMED, or this item was already reviewed.',
+    description: 'Seller order is not yet DELIVERED, or this item was already reviewed.',
   })
   async createReview(
     @CurrentUser() user: AuthenticatedUser,
@@ -207,7 +207,7 @@ export class OrdersController {
   @ApiParam({ name: 'itemId', format: 'uuid' })
   @ApiOperation({
     summary:
-      "Requests a return for one of the authenticated customer's own order items — one request per item, only after the seller has confirmed the order.",
+      "Requests a return for one of the authenticated customer's own order items — one request per item, only once the order has been delivered.",
   })
   @ApiResponse({ status: HttpStatus.CREATED, description: 'Return request created.' })
   @ApiResponse({
@@ -217,7 +217,7 @@ export class OrdersController {
   })
   @ApiResponse({
     status: HttpStatus.CONFLICT,
-    description: 'Seller order is not yet CONFIRMED, or a return was already requested for this item.',
+    description: 'Seller order is not yet DELIVERED, or a return was already requested for this item.',
   })
   async createReturn(
     @CurrentUser() user: AuthenticatedUser,

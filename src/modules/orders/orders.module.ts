@@ -1,6 +1,10 @@
 import { Module } from '@nestjs/common';
 import { OrdersController } from './orders.controller';
+import { CustomerClaimsController } from './customer-claims.controller';
 import { SellerOrdersController } from './seller-orders.controller';
+import { SellerClaimsController } from './seller-claims.controller';
+import { AdminClaimsController } from './admin-claims.controller';
+import { AdminDisputesController } from './admin-disputes.controller';
 import { AdminOrdersController } from './admin-orders.controller';
 import { SellerReviewsController } from './seller-reviews.controller';
 import { PublicReviewsController } from './public-reviews.controller';
@@ -35,18 +39,30 @@ import { PaymentsModule } from '../payments/payments.module';
  * segue o mesmo raciocínio para Return (ver comentário no model Return).
  *
  * ClaimsService/DisputesService (pós-venda, fundação P0 -- ver
- * claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md) são
- * registrados aqui como providers SOMENTE -- nenhum controller novo
- * nesta rodada (pedido explícito: parar e explicar antes de criar
- * qualquer controller novo, e não foi necessário nenhum pra entregar a
- * camada de serviço + testes). Ficam disponíveis pra injeção quando a
- * exposição HTTP for decidida numa rodada futura.
+ * claude/plano-pos-venda-reclamacoes-devolucoes-disputas.md) agora têm
+ * sua camada HTTP: CustomerClaimsController, SellerClaimsController,
+ * AdminClaimsController e AdminDisputesController (ver cada arquivo
+ * para o detalhe de rotas/guards/actor). Nenhum dos dois services foi
+ * duplicado como provider -- já estavam registrados abaixo desde a
+ * fundação.
+ *
+ * CustomerClaimsController precisa estar ANTES de OrdersController no
+ * array abaixo: GET /orders/claims (1 segmento estático) colide em
+ * forma com GET /orders/:id (1 segmento dinâmico) de OrdersController,
+ * e quem for registrado primeiro ganha o match (ver comentário na
+ * própria CustomerClaimsController). Os demais três controllers novos
+ * usam prefixos literais próprios (seller/claims, seller/returns/
+ * .../dispute, admin/claims, admin/returns/.../dispute, admin/disputes)
+ * sem colisão de forma com nenhuma rota existente, então sua posição
+ * no array é irrelevante.
  */
 @Module({
   imports: [PaymentsModule],
   controllers: [
+    CustomerClaimsController,
     OrdersController,
     SellerOrdersController,
+    SellerClaimsController,
     AdminOrdersController,
     SellerReviewsController,
     PublicReviewsController,
@@ -54,6 +70,8 @@ import { PaymentsModule } from '../payments/payments.module';
     AdminCouponsController,
     SellerCouponsController,
     AdminReturnsController,
+    AdminClaimsController,
+    AdminDisputesController,
   ],
   providers: [
     OrdersService,
