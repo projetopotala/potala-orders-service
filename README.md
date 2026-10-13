@@ -207,3 +207,30 @@ Ver [`.env.example`](.env.example) — comentado variável a variável.
    chamada de rede a identity-service por requisição autenticada.
 6. Wiring deste serviço em `potala-api-gateway` (`/api/v1/orders/*`) — ver
    commit correspondente em `potala-api-gateway`.
+   
+## Checkout para vendedores — atualização de outubro/2026
+
+O Marketplace Potala permite que vendedores realizem compras
+utilizando a mesma conta cadastrada como vendedor.
+
+### Regras de autorização
+
+- CUSTOMER: pode realizar compras normalmente.
+- SELLER: pode realizar compras com a mesma conta.
+- ADMIN: não possui acesso às rotas de comprador.
+
+O checkout identifica o comprador pelo `authUser.id`
+da sessão autenticada.
+
+O vendedor mantém acesso ao seu painel administrativo
+e aos pedidos relacionados às suas vendas.
+
+### Validação
+
+A correção foi implementada na branch `fix/seller-checkout`.
+
+- Build do Orders Service: aprovado.
+- Testes automatizados do Orders Service: 376 aprovados.
+- Checkout completo: pendente de homologação em Preview.
+
+Observação: o gateway de pagamento atual é simulado.
