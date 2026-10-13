@@ -33,17 +33,23 @@ import { AuthenticatedUser } from '../../common/types/authenticated-user';
 import { Role } from '../../common/types/identity-enums';
 
 /**
- * Every route here is customer-only (Role.CUSTOMER) — there is no seller or
- * admin view of orders in this controller. Sellers see their own
- * (read-only) SellerOrder rows through SellerOrdersController instead — see
- * seller-orders.controller.ts. SessionAuthGuard and RolesGuard are both
- * registered as APP_GUARD in app.module.ts, so neither guard is repeated
- * here.
+ * Every route here is a BUYER route: Role.CUSTOMER or Role.SELLER. A seller
+ * account (identity-service gives it ONLY the SELLER role -- never CUSTOMER,
+ * see AuthService.registerSeller) must be able to buy with the same
+ * account. The buyer is always identified by `user.id` from the session
+ * (never from the request body) and every query is scoped by it, so a
+ * seller only ever sees the orders/reviews/returns/favorites/coupons they
+ * bought. ADMIN is deliberately NOT allowed here. There is still no
+ * seller-side view of orders in this controller: sellers see the
+ * (read-only) SellerOrder rows of what they SELL through
+ * SellerOrdersController instead — see seller-orders.controller.ts.
+ * SessionAuthGuard and RolesGuard are both registered as APP_GUARD in
+ * app.module.ts, so neither guard is repeated here.
  */
 @ApiTags('orders')
 @ApiBearerAuth()
 @Controller('orders')
-@Roles(Role.CUSTOMER)
+@Roles(Role.CUSTOMER, Role.SELLER)
 export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,

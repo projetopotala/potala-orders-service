@@ -54,7 +54,10 @@ import { PostSaleActor } from '../../common/types/post-sale-actor';
 @ApiTags('customer-claims')
 @ApiBearerAuth()
 @Controller('orders')
-@Roles(Role.CUSTOMER)
+// CUSTOMER or SELLER: a seller account buys with the same account (it has no
+// CUSTOMER role), and acts here strictly as BUYER -- buildActor() below always
+// scopes by user.id, never by sellerContext. ADMIN stays excluded.
+@Roles(Role.CUSTOMER, Role.SELLER)
 export class CustomerClaimsController {
   constructor(
     private readonly claimsService: ClaimsService,
