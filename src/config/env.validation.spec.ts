@@ -41,6 +41,7 @@ describe('validateEnv', () => {
         apiKey: baseEnv.SELLERS_SERVICE_API_KEY,
         timeoutMs: 5000,
       },
+      permissionShadow: { enabled: false },
     });
   });
 
@@ -250,6 +251,29 @@ describe('validateEnv', () => {
       expect(() => validateEnv({ ...baseEnv, FRONTEND_URL: value })).toThrow(
         /FRONTEND_URL/,
       );
+    });
+  });
+
+  describe('PERMISSION_SHADOW_MODE (F1.3)', () => {
+    it('padrão desativado', () => {
+      expect(validateEnv(baseEnv).permissionShadow).toEqual({ enabled: false });
+    });
+
+    it('aceita true/false/1/0', () => {
+      expect(
+        validateEnv({ ...baseEnv, PERMISSION_SHADOW_MODE: 'true' })
+          .permissionShadow,
+      ).toEqual({ enabled: true });
+      expect(
+        validateEnv({ ...baseEnv, PERMISSION_SHADOW_MODE: '0' })
+          .permissionShadow,
+      ).toEqual({ enabled: false });
+    });
+
+    it('valor inválido derruba a inicialização (nunca liga por engano)', () => {
+      expect(() =>
+        validateEnv({ ...baseEnv, PERMISSION_SHADOW_MODE: 'enforced' }),
+      ).toThrow('PERMISSION_SHADOW_MODE');
     });
   });
 });

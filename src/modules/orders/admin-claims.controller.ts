@@ -23,6 +23,7 @@ import { AddClaimEvidenceDto } from './dto/add-claim-evidence.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { RequirePermission } from '../../common/permissions/require-permission.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user';
 import { Role } from '../../common/types/identity-enums';
 import { PostSaleActor } from '../../common/types/post-sale-actor';
@@ -67,6 +68,7 @@ export class AdminClaimsController {
   @ApiOperation({
     summary: 'Lists every claim, across every store, newest first.',
   })
+  @RequirePermission('aftersales:claim:read', { mode: 'COLLECTION' })
   async list(
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: PaginationQueryDto,
@@ -80,6 +82,7 @@ export class AdminClaimsController {
     summary: 'Fetches one claim, including messages and evidence.',
   })
   @ApiResponse({ status: 404, description: 'Claim does not exist.' })
+  @RequirePermission('aftersales:claim:read', { mode: 'SELLER_OWNED' })
   async getOne(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -94,6 +97,7 @@ export class AdminClaimsController {
     status: 409,
     description: 'This claim is no longer open for new messages.',
   })
+  @RequirePermission('aftersales:claim:update', { mode: 'SELLER_OWNED' })
   async addMessage(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -112,6 +116,7 @@ export class AdminClaimsController {
     status: 409,
     description: 'This claim is no longer open for new evidence.',
   })
+  @RequirePermission('aftersales:claim:update', { mode: 'SELLER_OWNED' })
   async addEvidence(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -127,6 +132,7 @@ export class AdminClaimsController {
     status: 409,
     description: 'The claim cannot move to ESCALATED from its current status.',
   })
+  @RequirePermission('aftersales:claim:update', { mode: 'SELLER_OWNED' })
   async escalate(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -145,6 +151,7 @@ export class AdminClaimsController {
     status: 409,
     description: 'The claim cannot move to RESOLVED from its current status.',
   })
+  @RequirePermission('aftersales:claim:update', { mode: 'SELLER_OWNED' })
   async resolve(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -163,6 +170,7 @@ export class AdminClaimsController {
     status: 409,
     description: 'The claim cannot move to CLOSED from its current status.',
   })
+  @RequirePermission('aftersales:claim:update', { mode: 'SELLER_OWNED' })
   async close(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -186,6 +194,7 @@ export class AdminClaimsController {
     description:
       'The claim is not in an eligible status, or already has a dispute.',
   })
+  @RequirePermission('aftersales:dispute:update', { mode: 'SELLER_OWNED' })
   async openDisputeFromClaim(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -205,6 +214,7 @@ export class AdminClaimsController {
     description:
       'The return is not in an eligible status, or already has a dispute.',
   })
+  @RequirePermission('aftersales:dispute:update', { mode: 'SELLER_OWNED' })
   async openDisputeFromReturn(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,

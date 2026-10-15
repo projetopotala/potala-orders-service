@@ -10,6 +10,7 @@ import { SessionAuthGuard } from './common/guards/session.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { OriginGuard } from './common/guards/origin.guard';
 import { RequestLoggingInterceptor } from './common/interceptors/request-logging.interceptor';
+import { PermissionShadowInterceptor } from './common/permissions/permission-shadow.interceptor';
 import { OrdersModule } from './modules/orders/orders.module';
 import { HealthModule } from './modules/health/health.module';
 
@@ -54,6 +55,8 @@ import { HealthModule } from './modules/health/health.module';
     { provide: APP_GUARD, useClass: SessionAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_INTERCEPTOR, useClass: RequestLoggingInterceptor },
+    // F1.3 -- modo sombra; sem efeito com PERMISSION_SHADOW_MODE=false (padrão).
+    { provide: APP_INTERCEPTOR, useClass: PermissionShadowInterceptor },
   ],
 })
 export class AppModule {}
