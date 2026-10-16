@@ -38,6 +38,10 @@ import {
 } from '../../common/constants/orders.constants';
 import { CreateCheckoutDto, ShippingAddressDto } from './dto/create-checkout.dto';
 import { CouponsService } from './coupons.service';
+import {
+  CheckoutIdempotencyHandle,
+  CheckoutIdempotencyService,
+} from './checkout-idempotency.service';
 
 type ValidatedItem = {
   productId: string;
@@ -77,6 +81,7 @@ export class OrdersService {
     @Inject(PAYMENT_GATEWAY_CLIENT)
     private readonly paymentGateway: PaymentGatewayClient,
     private readonly couponsService: CouponsService,
+    private readonly checkoutIdempotency: CheckoutIdempotencyService,
   ) {}
 
   async listForCustomer(customerId: string, query: PaginationQueryDto = {}) {
@@ -370,7 +375,72 @@ export class OrdersService {
     return buildPage(rows, limit);
   }
 
+  /** Checkout sem Idempotency-Key -- comportamento anterior, inalterado. */
   async checkout(customerId: string, dto: CreateCheckoutDto) {
+    return this.runCheckout(customerId, dto, null);
+  }
+
+  /**
+   * F2.1 -- checkout com Idempotency-Key (ver CheckoutIdempotencyService e
+   * docs/checkout-idempotency.md). A mesma chave, do mesmo cliente e com o
+   * mesmo payload, nunca cria um segundo pedido: o retry recebe o pedido já
+   * criado (`replayed: true`) ou o mesmo erro, sem nova reserva de estoque
+   * nem nova cobrança.
+   */
+  async checkoutIdempotent(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    idempotencyKey: string,
+  ): Promise<{
+    order: Awaited<ReturnType<OrdersService['getForCustomer']>>;
+    replayed: boolean;
+  }> {
+    const claim = await this.checkoutIdempotency.begin(
+      customerId,
+      idempotencyKey,
+      dto,
+    );
+    if (claim.kind === 'replay') {
+      return {
+        order: await this.getForCustomer(customerId, claim.orderId),
+        replayed: true,
+      };
+    }
+    try {
+      const order = await this.runCheckout(customerId, dto, claim.handle);
+      await this.checkoutIdempotency.complete(claim.handle);
+      return { order, replayed: false };
+    } catch (error) {
+      await this.checkoutIdempotency.fail(claim.handle, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Ponto de entrada do controller: header Idempotency-Key ausente ->
+   * checkout anterior (compatibilidade com clientes que ainda não enviam a
+   * chave); presente -> validado (400 se inválido) e idempotente.
+   */
+  async checkoutWithOptionalKey(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    rawIdempotencyKey: unknown,
+  ): Promise<{
+    order: Awaited<ReturnType<OrdersService['getForCustomer']>>;
+    replayed: boolean;
+  }> {
+    const key = this.checkoutIdempotency.parseKey(rawIdempotencyKey);
+    if (key === null) {
+      return { order: await this.checkout(customerId, dto), replayed: false };
+    }
+    return this.checkoutIdempotent(customerId, dto, key);
+  }
+
+  private async runCheckout(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    idempotency: CheckoutIdempotencyHandle | null,
+  ) {
     const validatedItems = await this.resolveAndValidateItems(dto.items);
     const sellerGroups = this.groupBySeller(validatedItems);
     const subtotalCents = this.sum(sellerGroups.map((group) => group.subtotalCents));
@@ -398,7 +468,13 @@ export class OrdersService {
       { subtotalCents, shippingCents, discountCents, totalCents },
       sellerGroups,
       couponId,
+      idempotency,
     );
+    if (idempotency) {
+      // A transação acima vinculou o pedido à chave (attachOrder) e foi
+      // confirmada: a partir daqui um retry nunca reexecuta este checkout.
+      idempotency.orderId = order.id;
+    }
 
     const inventoryItems: InventoryItemInput[] = validatedItems.map((item) => ({
       variantId: item.variantId,
@@ -638,6 +714,7 @@ export class OrdersService {
     },
     sellerGroups: SellerGroup[],
     couponId: string | null,
+    idempotency: CheckoutIdempotencyHandle | null = null,
   ) {
     for (let attempt = 0; attempt <= MAX_ORDER_NUMBER_RETRIES; attempt += 1) {
       const orderNumber = this.generateOrderNumber();
@@ -651,6 +728,7 @@ export class OrdersService {
             totals,
             sellerGroups,
             couponId,
+            idempotency,
           ),
         );
       } catch (error) {
@@ -683,6 +761,7 @@ export class OrdersService {
     },
     sellerGroups: SellerGroup[],
     couponId: string | null,
+    idempotency: CheckoutIdempotencyHandle | null = null,
   ) {
     // Dentro da mesma transação que cria o Order: se o número de pedido
     // colidir e esta tentativa for descartada, o rollback desfaz este
@@ -744,6 +823,13 @@ export class OrdersService {
           },
         });
       }
+    }
+
+    // F2.1 -- vincula o pedido à chave de idempotência na MESMA transação:
+    // se outra execução retomou a chave, attachOrder lança e tudo acima
+    // (pedido, subpedidos, itens, uso de cupom) é desfeito.
+    if (idempotency) {
+      await this.checkoutIdempotency.attachOrder(tx, idempotency, order.id);
     }
 
     return order;

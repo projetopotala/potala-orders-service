@@ -61,6 +61,13 @@ export type PrismaMock = {
     create: MockFn;
     update: MockFn;
   };
+  /** F2.1 -- idempotência do checkout (CheckoutIdempotencyService). */
+  checkoutIdempotencyKey: {
+    createMany: MockFn;
+    findUnique: MockFn;
+    updateMany: MockFn;
+    deleteMany: MockFn;
+  };
   $transaction: MockFn;
   $queryRaw: MockFn;
 };
@@ -145,6 +152,14 @@ export function createPrismaMock(): PrismaMock & PrismaService {
     paymentTransaction: {
       create: jest.fn(),
       update: jest.fn(),
+    },
+    // Default: a chave é nova (INSERT vence) e toda escrita condicional
+    // acerta a linha -- testes de concorrência/retry sobrescrevem.
+    checkoutIdempotencyKey: {
+      createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUnique: jest.fn(),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      deleteMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     $queryRaw: jest.fn(),
     $transaction: jest.fn(),

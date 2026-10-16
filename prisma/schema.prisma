@@ -181,11 +181,13 @@ model Order {
   createdAt     DateTime    @default(now()) @map("criado_em")
   updatedAt     DateTime    @updatedAt @map("atualizado_em")
 
-  shippingAddress     OrderShippingAddress?
-  sellerOrders        SellerOrder[]
-  paymentTransactions PaymentTransaction[]
+  shippingAddress        OrderShippingAddress?
+  sellerOrders           SellerOrder[]
+  paymentTransactions    PaymentTransaction[]
   /// Pos-venda (fundacao) -- ver model Claim mais abaixo.
-  claims              Claim[]
+  claims                 Claim[]
+  /// F2.1 -- chave de idempotência que criou este pedido (quando enviada).
+  checkoutIdempotencyKey CheckoutIdempotencyKey?
 
   @@index([customerId])
   @@index([status])
@@ -685,5 +687,54 @@ model Favorite {
   @@unique([customerId, productId])
   @@index([customerId])
   @@map("favoritos")
+  @@schema("orders")
+}
+
+// ---------------------------------------------------------------------------
+// F2.1 -- Idempotência do checkout
+// ---------------------------------------------------------------------------
+
+enum CheckoutIdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+
+  @@schema("orders")
+}
+
+/// Uma linha por (cliente, chave) de POST /orders/checkout com o header
+/// Idempotency-Key. A unicidade (cliente_id, chave) no Postgres é a garantia
+/// atômica entre requisições concorrentes e entre instâncias do serviço
+/// (INSERT ... ON CONFLICT DO NOTHING via createMany skipDuplicates).
+///
+/// - IN_PROGRESS sem pedido: posse temporária até `lockedUntil`; vencida,
+///   um retry pode retomar (troca de lockToken por UPDATE condicional).
+/// - IN_PROGRESS com pedido: execução interrompida depois de o pedido
+///   existir; nunca é reexecutada, o retry recebe o pedido existente.
+/// - COMPLETED: o retry recebe o pedido (estado atual).
+/// - FAILED: erro ocorrido depois de o pedido existir (reserva ou
+///   pagamento); o retry recebe o mesmo status/corpo de erro.
+/// requestHash = SHA-256 do payload canônico; mesma chave com outro
+/// payload é recusada (422). CHECKs extras na migration.
+model CheckoutIdempotencyKey {
+  id             String                    @id @default(uuid()) @db.Uuid
+  /// Referência solta (UUID) a identity.usuarios -- sem FK cross-schema.
+  customerId     String                    @map("cliente_id") @db.Uuid
+  key            String                    @map("chave") @db.VarChar(128)
+  requestHash    String                    @map("hash_requisicao") @db.Char(64)
+  status         CheckoutIdempotencyStatus @default(IN_PROGRESS)
+  lockToken      String                    @map("token_execucao") @db.Uuid
+  lockedUntil    DateTime                  @map("bloqueada_ate")
+  orderId        String?                   @unique @map("pedido_id") @db.Uuid
+  responseStatus Int?                      @map("status_resposta")
+  responseBody   Json?                     @map("corpo_resposta")
+  createdAt      DateTime                  @default(now()) @map("criado_em")
+  updatedAt      DateTime                  @updatedAt @map("atualizado_em")
+  completedAt    DateTime?                 @map("concluida_em")
+
+  order Order? @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  @@unique([customerId, key])
+  @@map("chaves_idempotencia_checkout")
   @@schema("orders")
 }

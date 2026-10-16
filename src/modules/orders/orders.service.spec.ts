@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { OrdersService } from './orders.service';
+import { CheckoutIdempotencyService } from './checkout-idempotency.service';
 import {
   createCatalogServiceClientMock,
   createCouponsServiceMock,
@@ -93,6 +94,7 @@ function setUpHappyPath() {
     catalogServiceClient as never,
     paymentGateway as never,
     couponsService as never,
+    new CheckoutIdempotencyService(prisma as never),
   );
 
   return { service, prisma, catalogServiceClient, paymentGateway, couponsService };
