@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { OrdersController } from './orders.controller';
 import { CheckoutIdempotencyService } from './checkout-idempotency.service';
+import { OrderTransitionsService } from './order-transitions.service';
 import { CustomerClaimsController } from './customer-claims.controller';
 import { SellerOrdersController } from './seller-orders.controller';
 import { SellerClaimsController } from './seller-claims.controller';
@@ -79,6 +80,7 @@ import { PaymentsModule } from '../payments/payments.module';
   providers: [
     OrdersService,
     CheckoutIdempotencyService,
+    OrderTransitionsService,
     ReviewsService,
     CouponsService,
     ReturnsService,

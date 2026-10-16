@@ -188,6 +188,8 @@ model Order {
   claims                 Claim[]
   /// F2.1 -- chave de idempotência que criou este pedido (quando enviada).
   checkoutIdempotencyKey CheckoutIdempotencyKey?
+  /// F2.2A -- histórico de status (do pedido e dos subpedidos).
+  statusHistory          OrderStatusHistory[]
 
   @@index([customerId])
   @@index([status])
@@ -233,10 +235,12 @@ model SellerOrder {
   createdAt       DateTime          @default(now()) @map("criado_em")
   updatedAt       DateTime          @updatedAt @map("atualizado_em")
 
-  order  Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  items  OrderItem[]
+  order         Order                @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  items         OrderItem[]
   /// Pos-venda (fundacao) -- ver model Claim mais abaixo.
-  claims Claim[]
+  claims        Claim[]
+  /// F2.2A -- histórico de status deste subpedido.
+  statusHistory OrderStatusHistory[]
 
   @@unique([orderId, sellerId])
   @@index([orderId])
@@ -736,5 +740,86 @@ model CheckoutIdempotencyKey {
 
   @@unique([customerId, key])
   @@map("chaves_idempotencia_checkout")
+  @@schema("orders")
+}
+
+// ---------------------------------------------------------------------------
+// F2.2A -- Histórico persistente de status de Order e SellerOrder
+// ---------------------------------------------------------------------------
+
+/// Qual agregado mudou de status: o pedido principal ou um subpedido.
+enum OrderStatusHistoryAggregate {
+  ORDER
+  SELLER_ORDER
+
+  @@schema("orders")
+}
+
+/// Fluxo que produziu a transição (nunca texto livre).
+enum OrderStatusHistorySource {
+  /// POST /orders/checkout: criação e cancelamentos internos do checkout.
+  CHECKOUT
+  /// Resultado síncrono do gateway dentro do checkout.
+  PAYMENT_CHECKOUT
+  /// Confirmação assíncrona do gateway (POST /payments/webhooks/:provider).
+  PAYMENT_WEBHOOK
+  /// Ação do vendedor sobre o próprio subpedido (fulfillment).
+  SELLER
+
+  @@schema("orders")
+}
+
+/// Quem executou: SYSTEM = o próprio serviço (nunca um humano inventado).
+enum OrderStatusHistoryActorType {
+  CUSTOMER
+  SELLER
+  SYSTEM
+
+  @@schema("orders")
+}
+
+/// Uma linha por transição EFETIVA de status de Order ou SellerOrder,
+/// gravada na MESMA transação do UPDATE condicional (status anterior
+/// esperado) que a produziu -- ver OrderTransitionsService. Operação
+/// repetida que não muda o status não gera linha.
+///
+/// - `id` é o identificador do evento.
+/// - `fromStatus` NULL = criação do agregado.
+/// - `sellerOrderId`/`sellerId` só em SELLER_ORDER (sellerId é snapshot,
+///   para filtrar por loja sem join).
+/// - `actorId` só quando conhecido (cliente do checkout, usuário da loja);
+///   transições do próprio serviço usam actorType SYSTEM e actorId NULL.
+/// - `reason`: código curto e fixo (ex.: INVENTORY_RESERVATION_FAILED),
+///   nunca mensagem de erro, payload ou dado pessoal.
+///
+/// Append-only. FKs com RESTRICT: excluir fisicamente um pedido ou
+/// subpedido com histórico falha em vez de apagar o histórico em silêncio.
+/// O histórico começa na ativação desta migration -- pedidos anteriores não
+/// têm eventos e nenhum evento passado é inventado (sem backfill).
+/// Status em VARCHAR (dois enums distintos na mesma tabela), com CHECK de
+/// valores por agregado na migration, junto com os demais CHECKs.
+model OrderStatusHistory {
+  id            String                      @id @default(uuid()) @db.Uuid
+  aggregateType OrderStatusHistoryAggregate @map("tipo_agregado")
+  orderId       String                      @map("pedido_id") @db.Uuid
+  sellerOrderId String?                     @map("pedido_vendedor_id") @db.Uuid
+  /// Referência solta (UUID) a sellers.vendedores -- sem FK cross-schema.
+  sellerId      String?                     @map("vendedor_id") @db.Uuid
+  fromStatus    String?                     @map("status_anterior") @db.VarChar(32)
+  toStatus      String                      @map("status_novo") @db.VarChar(32)
+  source        OrderStatusHistorySource    @map("origem")
+  actorType     OrderStatusHistoryActorType @map("tipo_ator")
+  /// Referência solta (UUID) a identity.usuarios -- sem FK cross-schema.
+  actorId       String?                     @map("ator_id") @db.Uuid
+  correlationId String?                     @map("correlacao_id") @db.VarChar(128)
+  reason        String?                     @map("motivo") @db.VarChar(100)
+  occurredAt    DateTime                    @default(now()) @map("ocorrido_em")
+
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  sellerOrder SellerOrder? @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+
+  @@index([orderId, occurredAt])
+  @@index([sellerOrderId, occurredAt])
+  @@map("historico_status_pedido")
   @@schema("orders")
 }

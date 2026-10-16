@@ -54,6 +54,8 @@ class FakeDb {
   readonly orderItems: Row[] = [];
   readonly payments: Row[] = [];
   readonly keys: Row[] = [];
+  /** F2.2A -- histórico de status (desfeito junto no rollback). */
+  readonly history: Row[] = [];
   private sequence = 0;
 
   readonly client = {
@@ -176,6 +178,14 @@ class FakeDb {
           this.patch(row, data, undo);
           return row;
         }),
+        // F2.2A -- UPDATE condicional (where inclui o status esperado).
+        updateMany: jest.fn(
+          async ({ where, data }: { where: Row; data: Row }) => {
+            const hits = this.orders.filter((row) => this.matches(row, where));
+            hits.forEach((row) => this.patch(row, data, undo));
+            return { count: hits.length };
+          },
+        ),
         findFirst: jest.fn(async ({ where }: { where: Row }) => {
           const order = this.orders.find(
             (row) => row.id === where.id && row.customerId === where.customerId,
@@ -204,12 +214,30 @@ class FakeDb {
         ),
         updateMany: jest.fn(
           async ({ where, data }: { where: Row; data: Row }) => {
-            const hits = this.sellerOrders.filter(
-              (row) => row.orderId === where.orderId,
+            const hits = this.sellerOrders.filter((row) =>
+              this.matches(row, where),
             );
             hits.forEach((row) => this.patch(row, data, undo));
             return { count: hits.length };
           },
+        ),
+        findMany: jest.fn(async ({ where }: { where: Row }) =>
+          this.sellerOrders
+            .filter((row) => this.matches(row, where))
+            .map((row) => ({
+              id: row.id,
+              sellerId: row.sellerId,
+              status: row.status,
+            })),
+        ),
+      },
+      orderStatusHistory: {
+        create: jest.fn(async ({ data }: { data: Row }) =>
+          this.insert(
+            this.history,
+            { id: this.nextId('event'), ...data },
+            undo,
+          ),
         ),
       },
       orderItem: {
@@ -236,6 +264,15 @@ class FakeDb {
           this.patch(row, data, undo);
           return row;
         }),
+        updateMany: jest.fn(
+          async ({ where, data }: { where: Row; data: Row }) => {
+            const hits = this.payments.filter((row) =>
+              this.matches(row, where),
+            );
+            hits.forEach((row) => this.patch(row, data, undo));
+            return { count: hits.length };
+          },
+        ),
       },
     };
   }
@@ -717,5 +754,81 @@ describe('OrdersService checkout -- F2.1 idempotency (mocked DB with UNIQUE + ro
       expect((replay as HttpException).getStatus()).toBe(409);
       expect(catalog.reserveInventory).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('F2.2A -- histórico de status junto com a idempotência da F2.1 (mocked DB)', () => {
+  it('H) mesma chave duas vezes: os eventos são gravados uma vez; o replay não grava nada', async () => {
+    const { db, checkout } = setUp();
+
+    await checkout(CUSTOMER_1, KEY_1);
+    const afterFirst = db.history.map((event) => [
+      event.aggregateType,
+      event.fromStatus,
+      event.toStatus,
+    ]);
+    const replay = await checkout(CUSTOMER_1, KEY_1);
+
+    expect(replay.replayed).toBe(true);
+    expect(afterFirst).toEqual([
+      ['ORDER', null, 'PENDING_PAYMENT'],
+      ['SELLER_ORDER', null, 'PENDING'],
+      ['ORDER', 'PENDING_PAYMENT', 'PAID'],
+      ['SELLER_ORDER', 'PENDING', 'CONFIRMED'],
+    ]);
+    expect(db.history).toHaveLength(4);
+    expect(db.history.every((event) => event.orderId === db.orders[0].id)).toBe(
+      true,
+    );
+  });
+
+  it('H) duas requisições no mesmo tick com a mesma chave: um pedido, um conjunto de eventos', async () => {
+    const { db, checkout } = setUp();
+
+    await Promise.allSettled([
+      checkout(CUSTOMER_1, KEY_1),
+      checkout(CUSTOMER_1, KEY_1),
+    ]);
+
+    expect(db.orders).toHaveLength(1);
+    expect(db.history).toHaveLength(4);
+  });
+
+  it('H/C) attachOrder falha (posse retomada por outra execução): pedido, subpedidos e eventos de criação são desfeitos juntos', async () => {
+    const { db, checkout, catalog } = setUp();
+    catalog.resolveVariants.mockImplementation(async () => {
+      // Entre o claim e a criação do pedido, outra execução "retoma" a chave.
+      db.keys[0].lockToken = '99999999-9999-4999-8999-999999999999';
+      return [variant()];
+    });
+
+    await expect(checkout(CUSTOMER_1, KEY_1)).rejects.toBeInstanceOf(
+      CheckoutIdempotencyInProgressException,
+    );
+
+    expect(db.orders).toHaveLength(0);
+    expect(db.sellerOrders).toHaveLength(0);
+    expect(db.history).toHaveLength(0);
+  });
+
+  it('H/G) falha conhecida depois do pedido (reserva 409): pedido e subpedido CANCELLED com eventos; o replay do 409 não grava nada', async () => {
+    const { db, checkout, catalog } = setUp();
+    catalog.reserveInventory.mockRejectedValueOnce(
+      new ConflictException('Insufficient stock for variant'),
+    );
+
+    await expect(checkout(CUSTOMER_1, KEY_1)).rejects.toBeInstanceOf(
+      ConflictException,
+    );
+    const events = db.history.length;
+    await expect(checkout(CUSTOMER_1, KEY_1)).rejects.toBeInstanceOf(
+      HttpException,
+    );
+
+    expect(db.orders[0].status).toBe('CANCELLED');
+    expect(db.sellerOrders[0].status).toBe('CANCELLED');
+    expect(events).toBe(4);
+    expect(db.history).toHaveLength(events);
+    expect(catalog.reserveInventory).toHaveBeenCalledTimes(1);
   });
 });
