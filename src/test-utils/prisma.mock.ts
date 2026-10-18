@@ -68,6 +68,10 @@ export type PrismaMock = {
   orderStatusHistory: {
     create: MockFn;
   };
+  /** F2.2B-A -- outbox (OrderTransitionsService; só INSERT). */
+  outboxEvent: {
+    create: MockFn;
+  };
   /** F2.1 -- idempotência do checkout (CheckoutIdempotencyService). */
   checkoutIdempotencyKey: {
     createMany: MockFn;
@@ -172,6 +176,9 @@ export function createPrismaMock(): PrismaMock & PrismaService {
       findUnique: jest.fn(),
     },
     orderStatusHistory: {
+      create: jest.fn().mockResolvedValue({}),
+    },
+    outboxEvent: {
       create: jest.fn().mockResolvedValue({}),
     },
     // Default: a chave é nova (INSERT vence) e toda escrita condicional

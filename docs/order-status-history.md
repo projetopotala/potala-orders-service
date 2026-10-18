@@ -80,7 +80,11 @@ O vendedor continua sem poder confirmar manualmente (`PATCH /seller/orders/:id/c
 - FKs `ON DELETE RESTRICT`: excluir fisicamente um pedido ou subpedido com histórico falha em vez de apagar o histórico.
 - **O histórico começa na ativação da migration.** Pedidos anteriores não têm eventos; nenhum evento passado é inventado (sem backfill).
 
-## 6. Validação
+## 6. Outbox (F2.2B-A)
+
+Cada linha de histórico efetiva gera, na mesma transação, exatamente um evento em `orders.eventos_outbox`. Ver `docs/outbox.md`.
+
+## 7. Validação
 
 - Testes mockados: `order-status-history.spec.ts`, além de `orders.service.spec.ts` e `orders.checkout-idempotency.spec.ts` (F2.1 + histórico). Provam a orquestração, **não** a atomicidade real do PostgreSQL.
 - Pendente de homologação isolada: aplicar a migration em banco descartável, conferir `prisma migrate diff` (diferença esperada: só os CHECKs) e provar a corrida real (duas transações concorrentes no mesmo status: uma `count 1`, outra `count 0`).

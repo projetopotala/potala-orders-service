@@ -43,8 +43,12 @@ class MemoryDb {
   readonly orderItems: Row[] = [];
   readonly payments: Row[] = [];
   readonly history: Row[] = [];
+  /** F2.2B-A -- outbox (desfeita junto no rollback). */
+  readonly outbox: Row[] = [];
   /** Faz o próximo INSERT no histórico falhar (teste de rollback). */
   failNextHistoryInsert = false;
+  /** Faz o próximo INSERT na outbox falhar (teste de rollback). */
+  failNextOutboxInsert = false;
   /** Faz o próximo UPDATE condicional de Order falhar (erro de banco). */
   failNextOrderUpdate = false;
   private sequence = 0;
@@ -231,6 +235,30 @@ class MemoryDb {
           );
         }),
       },
+      outboxEvent: {
+        create: jest.fn(async ({ data }: { data: Row }) => {
+          if (this.failNextOutboxInsert) {
+            this.failNextOutboxInsert = false;
+            throw new Error('simulated failure writing outbox event');
+          }
+          if (this.outbox.some((row) => row.id === data.id)) {
+            throw new Error('duplicate outbox event id');
+          }
+          if (
+            data.statusHistoryId &&
+            this.outbox.some(
+              (row) => row.statusHistoryId === data.statusHistoryId,
+            )
+          ) {
+            throw new Error('duplicate outbox event for the same history row');
+          }
+          return this.insert(
+            this.outbox,
+            { status: 'PENDING', attempts: 0, ...data },
+            undo,
+          );
+        }),
+      },
     };
   }
 
@@ -377,6 +405,8 @@ describe('OrderTransitionsService (unidade, com mock)', () => {
     expect(prisma.orderStatusHistory.create).toHaveBeenCalledTimes(1);
     expect(prisma.orderStatusHistory.create).toHaveBeenCalledWith({
       data: {
+        // F2.2B-A: id gerado na aplicação, para ligar o evento da outbox.
+        id: expect.any(String),
         aggregateType: 'ORDER',
         orderId: 'order-1',
         fromStatus: 'PENDING_PAYMENT',
@@ -404,6 +434,25 @@ describe('OrderTransitionsService (unidade, com mock)', () => {
 
     expect(moved).toBe(false);
     expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    // F2.2B-A: transição rejeitada também não grava evento na outbox.
+    expect(prisma.outboxEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('B) subpedido com status diferente do esperado (count 0): false, sem histórico e sem outbox', async () => {
+    const prisma = createPrismaMock();
+    prisma.sellerOrder.updateMany.mockResolvedValue({ count: 0 });
+
+    const moved = await transitions.transitionSellerOrder(
+      prisma as never,
+      { sellerOrderId: 'so-a', orderId: 'order-1', sellerId: SELLER_A },
+      'CONFIRMED',
+      'PREPARING',
+      { source: 'SELLER', actorType: 'SELLER' },
+    );
+
+    expect(moved).toBe(false);
+    expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
+    expect(prisma.outboxEvent.create).not.toHaveBeenCalled();
   });
 
   it('D) falha no UPDATE de status: o erro propaga e nenhum evento é gravado', async () => {
@@ -1049,5 +1098,366 @@ describe('F2.2A -- fulfillment do vendedor', () => {
     expect(db.sellerOrders[0].status).toBe('PENDING');
     expect(db.orders[0].status).toBe('PENDING_PAYMENT');
     expect(db.history).toHaveLength(0);
+  });
+});
+
+describe('F2.2B-A -- outbox gravada junto com o histórico (MemoryDb)', () => {
+  /**
+   * Invariante da entrega: cada linha de histórico efetiva tem exatamente
+   * um evento na outbox ligado a ela, e nenhum evento existe sem histórico.
+   */
+  function expectOutboxMirrorsHistory(db: MemoryDb) {
+    expect(db.outbox).toHaveLength(db.history.length);
+    const historyIds = new Set(db.history.map((row) => row.id));
+    for (const event of db.outbox) {
+      expect(historyIds.has(event.statusHistoryId)).toBe(true);
+      expect(event.id).not.toBe(event.statusHistoryId);
+      expect(event.status).toBe('PENDING');
+    }
+    expect(new Set(db.outbox.map((event) => event.id)).size).toBe(
+      db.outbox.length,
+    );
+  }
+
+  it('criação de pedido multivendedor: 1 OrderCreated + 1 SellerOrderCreated por subpedido, junto com o histórico', async () => {
+    const { db, service, gateway } = setUp();
+    gateway.charge.mockResolvedValue({
+      status: 'PENDING',
+      provider: 'mock',
+      providerRef: 'mock_ref_pix',
+    });
+
+    await service.checkout(CUSTOMER, twoSellerCart());
+
+    expectOutboxMirrorsHistory(db);
+    expect(db.outbox.map((event) => event.eventType)).toEqual([
+      'orders.order.created',
+      'orders.seller_order.created',
+      'orders.seller_order.created',
+    ]);
+    const [orderCreated, ...sellerCreated] = db.outbox;
+    expect(orderCreated).toEqual(
+      expect.objectContaining({
+        eventVersion: 1,
+        aggregateType: 'ORDER',
+        aggregateId: db.orders[0].id,
+        orderId: db.orders[0].id,
+        payload: {
+          orderId: db.orders[0].id,
+          status: 'PENDING_PAYMENT',
+          source: 'CHECKOUT',
+        },
+      }),
+    );
+    // eventos distintos, um por subpedido, cada um com a própria loja
+    expect(sellerCreated.map((event) => event.aggregateId)).toEqual(
+      db.sellerOrders.map((row) => row.id),
+    );
+    expect(
+      sellerCreated.map((event) => (event.payload as Row).sellerId),
+    ).toEqual([SELLER_A, SELLER_B]);
+    expect(new Set(sellerCreated.map((event) => event.id)).size).toBe(2);
+  });
+
+  it('transição válida: exatamente um evento SellerOrderStatusChanged, ligado ao histórico', async () => {
+    const { db, service } = setUp();
+    const { orderId, sellerOrderIds } = db.seedOrder('PAID', [
+      { sellerId: SELLER_A, status: 'CONFIRMED' },
+    ]);
+
+    await service.prepareForSeller(SELLER_A, sellerOrderIds[0], STORE_USER_A);
+
+    expectOutboxMirrorsHistory(db);
+    expect(db.outbox).toEqual([
+      expect.objectContaining({
+        eventType: 'orders.seller_order.status_changed',
+        eventVersion: 1,
+        aggregateType: 'SELLER_ORDER',
+        aggregateId: sellerOrderIds[0],
+        orderId,
+        statusHistoryId: db.history[0].id,
+        payload: {
+          orderId,
+          sellerOrderId: sellerOrderIds[0],
+          sellerId: SELLER_A,
+          fromStatus: 'CONFIRMED',
+          toStatus: 'PREPARING',
+          source: 'SELLER',
+          reason: null,
+        },
+      }),
+    ]);
+  });
+
+  it('pagamento aprovado: OrderStatusChanged (PAID) + SellerOrderStatusChanged (CONFIRMED) por subpedido; motivo PAYMENT_APPROVED não fala de estoque', async () => {
+    const { db, service } = setUp();
+
+    await service.checkout(CUSTOMER, twoSellerCart());
+
+    expectOutboxMirrorsHistory(db);
+    const changed = db.outbox.filter((event) =>
+      String(event.eventType).endsWith('.status_changed'),
+    );
+    expect(changed.map((event) => event.eventType)).toEqual([
+      'orders.order.status_changed',
+      'orders.seller_order.status_changed',
+      'orders.seller_order.status_changed',
+    ]);
+    expect(changed.map((event) => (event.payload as Row).toStatus)).toEqual([
+      'PAID',
+      'CONFIRMED',
+      'CONFIRMED',
+    ]);
+    expect(
+      changed.every(
+        (event) =>
+          (event.payload as Row).reason === 'PAYMENT_APPROVED' &&
+          (event.payload as Row).source === 'PAYMENT_CHECKOUT',
+      ),
+    ).toBe(true);
+    // Nenhum evento de estoque: a baixa no catálogo é operação externa.
+    expect(
+      db.outbox.some((event) =>
+        /inventory|stock/i.test(String(event.eventType)),
+      ),
+    ).toBe(false);
+  });
+
+  it('transições rejeitadas não geram evento (pular etapa, webhook repetido, estado inconsistente)', async () => {
+    const { db, service } = setUp();
+    const paid = db.seedOrder('PAID', [
+      { sellerId: SELLER_A, status: 'CONFIRMED' },
+    ]);
+    await expect(
+      service.shipForSeller(SELLER_A, paid.sellerOrderIds[0]),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(db.outbox).toHaveLength(0);
+
+    const pending = db.seedOrder('PENDING_PAYMENT', [
+      { sellerId: SELLER_A, status: 'PENDING' },
+      { sellerId: SELLER_B, status: 'CONFIRMED' },
+    ]);
+    db.seedPendingPayment(pending.orderId, 'mock_ref_mismatch');
+    await service.confirmPaymentFromWebhook({
+      provider: 'mock',
+      providerRef: 'mock_ref_mismatch',
+      status: 'APPROVED',
+    });
+    expect(db.outbox).toHaveLength(0);
+
+    await service.confirmPaymentFromWebhook({
+      provider: 'mock',
+      providerRef: 'mock_ref_mismatch',
+      status: 'APPROVED',
+    });
+    expect(db.outbox).toHaveLength(0);
+    expect(db.history).toHaveLength(0);
+
+    // UPDATE condicional do pedido sem linha (pedido já CANCELLED, subpedido
+    // PENDING): a aprovação tardia não gera histórico nem evento.
+    const late = db.seedOrder('CANCELLED', [
+      { sellerId: SELLER_A, status: 'PENDING' },
+    ]);
+    db.seedPendingPayment(late.orderId, 'mock_ref_late_cas');
+    await service.confirmPaymentFromWebhook({
+      provider: 'mock',
+      providerRef: 'mock_ref_late_cas',
+      status: 'APPROVED',
+    });
+    expect(db.orders.find((row) => row.id === late.orderId)?.status).toBe(
+      'CANCELLED',
+    );
+    expect(db.outbox).toHaveLength(0);
+    expect(db.history).toHaveLength(0);
+  });
+
+  it('concorrência simulada: dois "preparar" e dois webhooks simultâneos não duplicam eventos', async () => {
+    const { db, service } = setUp();
+    const paid = db.seedOrder('PAID', [
+      { sellerId: SELLER_A, status: 'CONFIRMED' },
+    ]);
+    await Promise.allSettled([
+      service.prepareForSeller(SELLER_A, paid.sellerOrderIds[0]),
+      service.prepareForSeller(SELLER_A, paid.sellerOrderIds[0]),
+    ]);
+    expect(db.outbox).toHaveLength(1);
+
+    const pending = db.seedOrder('PENDING_PAYMENT', [
+      { sellerId: SELLER_B, status: 'PENDING' },
+    ]);
+    db.seedPendingPayment(pending.orderId, 'mock_ref_race');
+    const approved = {
+      provider: 'mock',
+      providerRef: 'mock_ref_race',
+      status: 'APPROVED' as const,
+    };
+    await Promise.all([
+      service.confirmPaymentFromWebhook(approved),
+      service.confirmPaymentFromWebhook(approved),
+    ]);
+
+    expectOutboxMirrorsHistory(db);
+    expect(
+      db.outbox.filter((event) => event.orderId === pending.orderId),
+    ).toHaveLength(2); // PAID + 1 subpedido CONFIRMED, uma única vez
+  });
+
+  it('falha ao gravar a outbox desfaz status e histórico da transição (cancelamento por falha de reserva)', async () => {
+    const { db, service, catalog } = setUp();
+    catalog.reserveInventory.mockImplementation(async () => {
+      db.failNextOutboxInsert = true;
+      throw new ConflictException('Insufficient stock');
+    });
+
+    await expect(service.checkout(CUSTOMER, twoSellerCart())).rejects.toThrow(
+      'simulated failure writing outbox event',
+    );
+
+    expect(db.orders[0].status).toBe('PENDING_PAYMENT');
+    expect(db.sellerOrders.map((row) => row.status)).toEqual([
+      'PENDING',
+      'PENDING',
+    ]);
+    // só os 3 fatos de criação (já confirmados) existem, com seus eventos
+    expect(db.history).toHaveLength(3);
+    expectOutboxMirrorsHistory(db);
+    expect(eventsOf(db, { toStatus: 'CANCELLED' })).toHaveLength(0);
+  });
+
+  it('falha ao gravar o histórico não deixa evento isolado na outbox', async () => {
+    const { db, service, catalog } = setUp();
+    catalog.reserveInventory.mockImplementation(async () => {
+      db.failNextHistoryInsert = true;
+      throw new ConflictException('Insufficient stock');
+    });
+
+    await expect(service.checkout(CUSTOMER, twoSellerCart())).rejects.toThrow(
+      'simulated failure writing order status history',
+    );
+
+    expect(db.orders[0].status).toBe('PENDING_PAYMENT');
+    expect(db.history).toHaveLength(3);
+    expectOutboxMirrorsHistory(db);
+  });
+
+  it('falha ao gravar a outbox na CRIAÇÃO desfaz o pedido inteiro (sem pedido, histórico ou evento)', async () => {
+    const { db, service, catalog } = setUp();
+    db.failNextOutboxInsert = true;
+
+    await expect(service.checkout(CUSTOMER, twoSellerCart())).rejects.toThrow(
+      'simulated failure writing outbox event',
+    );
+
+    expect(db.orders).toHaveLength(0);
+    expect(db.sellerOrders).toHaveLength(0);
+    expect(db.history).toHaveLength(0);
+    expect(db.outbox).toHaveLength(0);
+    expect(catalog.reserveInventory).not.toHaveBeenCalled();
+  });
+
+  it('cancelamento multivendedor: OrderStatusChanged + um SellerOrderStatusChanged por loja, todos CANCELLED e consistentes', async () => {
+    const { db, service, catalog } = setUp();
+    catalog.reserveInventory.mockRejectedValue(
+      new ConflictException('Insufficient stock'),
+    );
+
+    await expect(
+      service.checkout(CUSTOMER, twoSellerCart()),
+    ).rejects.toBeInstanceOf(ConflictException);
+
+    expectOutboxMirrorsHistory(db);
+    const cancelled = db.outbox.filter(
+      (event) => (event.payload as Row).toStatus === 'CANCELLED',
+    );
+    expect(cancelled.map((event) => event.eventType)).toEqual([
+      'orders.order.status_changed',
+      'orders.seller_order.status_changed',
+      'orders.seller_order.status_changed',
+    ]);
+    expect(
+      cancelled.every(
+        (event) =>
+          (event.payload as Row).reason === 'INVENTORY_RESERVATION_FAILED',
+      ),
+    ).toBe(true);
+    expect(db.orders[0].status).toBe('CANCELLED');
+    expect(db.sellerOrders.every((row) => row.status === 'CANCELLED')).toBe(
+      true,
+    );
+  });
+
+  it('gateway indisponível (resultado desconhecido): só o cancelamento do pedido vira evento -- nenhum evento de pagamento recusado', async () => {
+    const { db, service, gateway } = setUp();
+    gateway.charge.mockRejectedValue(new Error('connection reset'));
+
+    await expect(service.checkout(CUSTOMER, twoSellerCart())).rejects.toThrow();
+
+    expectOutboxMirrorsHistory(db);
+    expect(
+      db.outbox.some((event) => /payment/i.test(String(event.eventType))),
+    ).toBe(false);
+    expect(
+      db.outbox
+        .filter((event) => (event.payload as Row).toStatus === 'CANCELLED')
+        .every(
+          (event) =>
+            (event.payload as Row).reason === 'PAYMENT_GATEWAY_UNAVAILABLE',
+        ),
+    ).toBe(true);
+  });
+
+  it('eventos não carregam dados pessoais nem sensíveis: só os campos do contrato v1', async () => {
+    const { db, service } = setUp();
+    const { sellerOrderIds } = db.seedOrder('PAID', [
+      { sellerId: SELLER_A, status: 'CONFIRMED' },
+    ]);
+    await service.checkout(CUSTOMER, twoSellerCart());
+    await service.prepareForSeller(SELLER_A, sellerOrderIds[0], STORE_USER_A);
+
+    const allowed: Record<string, string[]> = {
+      'orders.order.created': ['orderId', 'source', 'status'],
+      'orders.order.status_changed': [
+        'fromStatus',
+        'orderId',
+        'reason',
+        'source',
+        'toStatus',
+      ],
+      'orders.seller_order.created': [
+        'orderId',
+        'sellerId',
+        'sellerOrderId',
+        'source',
+        'status',
+      ],
+      'orders.seller_order.status_changed': [
+        'fromStatus',
+        'orderId',
+        'reason',
+        'sellerId',
+        'sellerOrderId',
+        'source',
+        'toStatus',
+      ],
+    };
+    for (const event of db.outbox) {
+      expect(Object.keys(event.payload as Row).sort()).toEqual(
+        allowed[event.eventType as string],
+      );
+    }
+    const serialized = JSON.stringify(db.outbox.map((event) => event.payload));
+    for (const forbidden of [
+      CUSTOMER,
+      STORE_USER_A,
+      'Maria',
+      'Rua das Flores',
+      '01310-000',
+      'mock_ref',
+      'Produto',
+      'SKU-',
+      '1000',
+    ]) {
+      expect(serialized.includes(forbidden)).toBe(false);
+    }
   });
 });

@@ -190,6 +190,8 @@ model Order {
   checkoutIdempotencyKey CheckoutIdempotencyKey?
   /// F2.2A -- histórico de status (do pedido e dos subpedidos).
   statusHistory          OrderStatusHistory[]
+  /// F2.2B-A -- eventos de domínio pendentes de publicação (outbox).
+  outboxEvents           OutboxEvent[]
 
   @@index([customerId])
   @@index([status])
@@ -817,9 +819,77 @@ model OrderStatusHistory {
 
   order       Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
   sellerOrder SellerOrder? @relation(fields: [sellerOrderId], references: [id], onDelete: Restrict)
+  /// F2.2B-A -- evento de outbox derivado desta linha (1:1).
+  outboxEvent OutboxEvent?
 
   @@index([orderId, occurredAt])
   @@index([sellerOrderId, occurredAt])
   @@map("historico_status_pedido")
+  @@schema("orders")
+}
+
+// ---------------------------------------------------------------------------
+// F2.2B-A -- Outbox transacional (somente persistência)
+// ---------------------------------------------------------------------------
+
+/// Estado de publicação de um evento da outbox. Nesta entrega só PENDING é
+/// gravado: não existe publicador. PROCESSING/PUBLISHED/FAILED ficam
+/// reservados para a F2.2B-B (claim com lease, sucesso, tentativas
+/// esgotadas).
+enum OutboxEventStatus {
+  PENDING
+  PROCESSING
+  PUBLISHED
+  FAILED
+
+  @@schema("orders")
+}
+
+/// Um evento de domínio por transição EFETIVA registrada no histórico
+/// (OrderStatusHistory), gravado na MESMA transação que o UPDATE de status
+/// e o INSERT do histórico -- ver OrderTransitionsService. Transição
+/// rejeitada (UPDATE condicional sem linha) não gera histórico nem evento;
+/// rollback desfaz os três juntos.
+///
+/// - `id` é o eventId (UUID gerado na aplicação, independente do histórico).
+/// - `statusHistoryId` liga o evento à linha de histórico que o originou
+///   (único: no máximo um evento por linha).
+/// - `sequence` é a ordem de INSERÇÃO (identity). Só garante ordem dentro
+///   de um mesmo agregado (as transições do agregado se serializam no lock
+///   da linha); NÃO representa a ordem global dos commits.
+/// - `payload` é mínimo e versionado (`eventVersion`): IDs, status e código
+///   de motivo -- nunca endereço, e-mail, nome, valores, itens ou tokens.
+/// - Campos de entrega (attempts, nextAttemptAt, lockedUntil, lockToken,
+///   lastError, publishedAt) existem para a F2.2B-B; nesta entrega ficam
+///   nos defaults.
+/// Retenção: sem expurgo automático nesta entrega (ver docs/outbox.md).
+/// FKs com RESTRICT, no mesmo padrão do histórico.
+model OutboxEvent {
+  id              String              @id @db.Uuid
+  sequence        BigInt              @unique @default(autoincrement()) @map("sequencia")
+  eventType       String              @map("tipo_evento") @db.VarChar(100)
+  eventVersion    Int                 @map("versao_evento")
+  aggregateType   String              @map("tipo_agregado") @db.VarChar(32)
+  aggregateId     String              @map("agregado_id") @db.Uuid
+  orderId         String              @map("pedido_id") @db.Uuid
+  statusHistoryId String?             @unique @map("historico_id") @db.Uuid
+  payload         Json
+  correlationId   String?             @map("correlacao_id") @db.VarChar(128)
+  occurredAt      DateTime            @default(now()) @map("ocorrido_em")
+  status          OutboxEventStatus   @default(PENDING)
+  attempts        Int                 @default(0) @map("tentativas")
+  nextAttemptAt   DateTime            @default(now()) @map("proxima_tentativa_em")
+  lockedUntil     DateTime?           @map("bloqueado_ate")
+  lockToken       String?             @map("token_processamento") @db.Uuid
+  lastError       String?             @map("ultimo_erro") @db.VarChar(500)
+  publishedAt     DateTime?           @map("publicado_em")
+
+  order         Order               @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  statusHistory OrderStatusHistory? @relation(fields: [statusHistoryId], references: [id], onDelete: Restrict)
+
+  @@index([status, nextAttemptAt])
+  @@index([aggregateType, aggregateId, sequence])
+  @@index([orderId])
+  @@map("eventos_outbox")
   @@schema("orders")
 }

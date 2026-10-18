@@ -56,6 +56,8 @@ class FakeDb {
   readonly keys: Row[] = [];
   /** F2.2A -- histórico de status (desfeito junto no rollback). */
   readonly history: Row[] = [];
+  /** F2.2B-A -- outbox (desfeita junto no rollback). */
+  readonly outbox: Row[] = [];
   private sequence = 0;
 
   readonly client = {
@@ -238,6 +240,11 @@ class FakeDb {
             { id: this.nextId('event'), ...data },
             undo,
           ),
+        ),
+      },
+      outboxEvent: {
+        create: jest.fn(async ({ data }: { data: Row }) =>
+          this.insert(this.outbox, { status: 'PENDING', ...data }, undo),
         ),
       },
       orderItem: {
@@ -830,5 +837,70 @@ describe('F2.2A -- histórico de status junto com a idempotência da F2.1 (mocke
     expect(events).toBe(4);
     expect(db.history).toHaveLength(events);
     expect(catalog.reserveInventory).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('F2.2B-A -- outbox junto com a idempotência da F2.1 (mocked DB)', () => {
+  it('replay com a mesma chave não grava nenhum evento novo', async () => {
+    const { db, checkout } = setUp();
+
+    await checkout(CUSTOMER_1, KEY_1);
+    const afterFirst = db.outbox.map((event) => event.eventType);
+    const replay = await checkout(CUSTOMER_1, KEY_1);
+    await checkout(CUSTOMER_1, KEY_1);
+
+    expect(replay.replayed).toBe(true);
+    expect(afterFirst).toEqual([
+      'orders.order.created',
+      'orders.seller_order.created',
+      'orders.order.status_changed',
+      'orders.seller_order.status_changed',
+    ]);
+    expect(db.outbox).toHaveLength(4);
+    expect(db.outbox).toHaveLength(db.history.length);
+    expect(new Set(db.outbox.map((event) => event.statusHistoryId))).toEqual(
+      new Set(db.history.map((row) => row.id)),
+    );
+  });
+
+  it('duas requisições no mesmo tick com a mesma chave: um único conjunto de eventos', async () => {
+    const { db, checkout } = setUp();
+
+    await Promise.allSettled([
+      checkout(CUSTOMER_1, KEY_1),
+      checkout(CUSTOMER_1, KEY_1),
+    ]);
+
+    expect(db.orders).toHaveLength(1);
+    expect(db.outbox).toHaveLength(4);
+  });
+
+  it('attachOrder falho (chave retomada) desfaz pedido, histórico e eventos juntos', async () => {
+    const { db, checkout, catalog } = setUp();
+    catalog.resolveVariants.mockImplementation(async () => {
+      db.keys[0].lockToken = '99999999-9999-4999-8999-999999999999';
+      return [variant()];
+    });
+
+    await expect(checkout(CUSTOMER_1, KEY_1)).rejects.toBeInstanceOf(
+      CheckoutIdempotencyInProgressException,
+    );
+
+    expect(db.orders).toHaveLength(0);
+    expect(db.history).toHaveLength(0);
+    expect(db.outbox).toHaveLength(0);
+  });
+
+  it('erro incerto depois do pedido (P-1) e retries: os eventos já confirmados não se repetem', async () => {
+    const { db, checkout } = setUp();
+    db.client.order.findFirst.mockRejectedValueOnce(new Error('transient'));
+    await expect(checkout(CUSTOMER_1, KEY_1)).rejects.toThrow('transient');
+    const events = db.outbox.length;
+
+    await checkout(CUSTOMER_1, KEY_1);
+    await checkout(CUSTOMER_1, KEY_1);
+
+    expect(events).toBe(4);
+    expect(db.outbox).toHaveLength(events);
   });
 });

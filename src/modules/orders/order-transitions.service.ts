@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import {
   OrderStatus,
   OrderStatusHistoryActorType,
@@ -7,6 +8,7 @@ import {
   Prisma,
   SellerOrderStatus,
 } from '@prisma/client';
+import { buildStatusHistoryOutboxEvent } from './order-outbox-events';
 
 /**
  * Quem/por que de uma transição. `actorId` só quando conhecido; uma
@@ -70,6 +72,12 @@ export interface SellerOrderRef {
  *
  * A criação de Order/SellerOrder também gera um evento (`fromStatus` NULL),
  * gravado na mesma transação que insere a linha.
+ *
+ * F2.2B-A -- cada linha de histórico efetiva gera, no MESMO `tx` e logo em
+ * seguida, exatamente uma linha na outbox (orders.eventos_outbox), ligada
+ * pelo id do histórico. Sem histórico (transição rejeitada) não há evento;
+ * falha no histórico ou na outbox desfaz status, histórico e evento juntos.
+ * Nada é publicado aqui: não existe publicador nesta entrega.
  */
 @Injectable()
 export class OrderTransitionsService {
@@ -79,15 +87,16 @@ export class OrderTransitionsService {
     status: OrderStatus,
     context: OrderTransitionContext,
   ): Promise<void> {
-    await tx.orderStatusHistory.create({
-      data: {
+    await this.appendHistory(
+      tx,
+      {
         aggregateType: OrderStatusHistoryAggregate.ORDER,
         orderId,
         fromStatus: null,
         toStatus: status,
-        ...this.contextColumns(context),
       },
-    });
+      context,
+    );
   }
 
   async recordSellerOrderCreated(
@@ -96,17 +105,18 @@ export class OrderTransitionsService {
     status: SellerOrderStatus,
     context: OrderTransitionContext,
   ): Promise<void> {
-    await tx.orderStatusHistory.create({
-      data: {
+    await this.appendHistory(
+      tx,
+      {
         aggregateType: OrderStatusHistoryAggregate.SELLER_ORDER,
         orderId: ref.orderId,
         sellerOrderId: ref.sellerOrderId,
         sellerId: ref.sellerId,
         fromStatus: null,
         toStatus: status,
-        ...this.contextColumns(context),
       },
-    });
+      context,
+    );
   }
 
   /** `from` -> `to` no Order; true só se ESTA chamada mudou o status. */
@@ -124,15 +134,16 @@ export class OrderTransitionsService {
     if (count !== 1) {
       return false;
     }
-    await tx.orderStatusHistory.create({
-      data: {
+    await this.appendHistory(
+      tx,
+      {
         aggregateType: OrderStatusHistoryAggregate.ORDER,
         orderId,
         fromStatus: from,
         toStatus: to,
-        ...this.contextColumns(context),
       },
-    });
+      context,
+    );
     return true;
   }
 
@@ -158,17 +169,18 @@ export class OrderTransitionsService {
     if (count !== 1) {
       return false;
     }
-    await tx.orderStatusHistory.create({
-      data: {
+    await this.appendHistory(
+      tx,
+      {
         aggregateType: OrderStatusHistoryAggregate.SELLER_ORDER,
         orderId: ref.orderId,
         sellerOrderId: ref.sellerOrderId,
         sellerId: ref.sellerId,
         fromStatus: from,
         toStatus: to,
-        ...this.contextColumns(context),
       },
-    });
+      context,
+    );
     return true;
   }
 
@@ -225,6 +237,39 @@ export class OrderTransitionsService {
       }
     }
     return rows.length;
+  }
+
+  /**
+   * Única gravação de histórico do serviço: INSERT no histórico e, em
+   * seguida, INSERT do evento na outbox, os dois no MESMO `tx`. Só é
+   * chamada depois de uma criação ou de um UPDATE condicional que acertou a
+   * linha -- uma linha de histórico efetiva, um evento.
+   */
+  private async appendHistory(
+    tx: Prisma.TransactionClient,
+    entry: {
+      aggregateType: OrderStatusHistoryAggregate;
+      orderId: string;
+      sellerOrderId?: string;
+      sellerId?: string;
+      fromStatus: string | null;
+      toStatus: string;
+    },
+    context: OrderTransitionContext,
+  ): Promise<void> {
+    const historyId = randomUUID();
+    await tx.orderStatusHistory.create({
+      data: { id: historyId, ...entry, ...this.contextColumns(context) },
+    });
+    await tx.outboxEvent.create({
+      data: buildStatusHistoryOutboxEvent({
+        historyId,
+        ...entry,
+        source: context.source,
+        reason: context.reason ?? null,
+        correlationId: context.correlationId ?? null,
+      }),
+    });
   }
 
   private contextColumns(context: OrderTransitionContext) {
