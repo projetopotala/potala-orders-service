@@ -135,6 +135,9 @@ describe('OrdersController com usuário SELLER: comprador = authUser.id', () => 
   function build() {
     const ordersService = {
       checkout: jest.fn().mockResolvedValue({ id: 'order-1' }),
+      checkoutWithOptionalKey: jest
+        .fn()
+        .mockResolvedValue({ order: { id: 'order-1' }, replayed: false }),
       listForCustomer: jest.fn().mockResolvedValue({ items: [] }),
       getForCustomer: jest.fn().mockResolvedValue({ id: OTHER_ORDER_ID }),
     } as unknown as jest.Mocked<OrdersService>;
@@ -173,9 +176,21 @@ describe('OrdersController com usuário SELLER: comprador = authUser.id', () => 
       shippingAddress: {},
       customerId: '00000000-0000-4000-8000-0000000bad01',
     } as unknown as CreateCheckoutDto;
-    await controller.checkout(seller, dto);
-    expect(ordersService.checkout).toHaveBeenCalledTimes(1);
-    expect(ordersService.checkout.mock.calls[0][0]).toBe(USER_ID);
+    // F2.3 (integracao com a F2.1): o controller passou a delegar para
+    // checkoutWithOptionalKey(user.id, dto, Idempotency-Key) e recebe a
+    // resposta HTTP (header Idempotent-Replayed). A regra testada aqui nao
+    // muda: o comprador vem da sessao, nunca do body.
+    const response = {
+      setHeader: jest.fn(),
+    } as unknown as Parameters<OrdersController['checkout']>[3];
+    await controller.checkout(seller, dto, undefined, response);
+    expect(ordersService.checkoutWithOptionalKey).toHaveBeenCalledTimes(1);
+    expect(ordersService.checkoutWithOptionalKey.mock.calls[0][0]).toBe(
+      USER_ID,
+    );
+    expect(
+      ordersService.checkoutWithOptionalKey.mock.calls[0][2],
+    ).toBeUndefined();
   });
 
   it('list/getOne/returns/reviews/favorites escopam sempre por authUser.id', async () => {

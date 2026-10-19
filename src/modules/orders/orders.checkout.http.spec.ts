@@ -143,13 +143,26 @@ describe('POST /orders/checkout -- F2.1 Idempotency-Key over HTTP with the real 
     expect(checkoutWithOptionalKey).not.toHaveBeenCalled();
   });
 
-  it.each(['vendedor', 'admin'])(
-    '%s session: 403 as before (checkout stays CUSTOMER-only in this base), service never called',
-    async (session) => {
-      await post(session).set('Idempotency-Key', KEY).send(BODY).expect(403);
-      expect(checkoutWithOptionalKey).not.toHaveBeenCalled();
-    },
-  );
+  // F2.3 -- integrado com a D-16 (vendedor tambem compra): a rota de
+  // checkout passou a aceitar CUSTOMER ou SELLER. ADMIN continua 403.
+  it('admin session: 403, service never called', async () => {
+    await post('admin').set('Idempotency-Key', KEY).send(BODY).expect(403);
+    expect(checkoutWithOptionalKey).not.toHaveBeenCalled();
+  });
+
+  it('vendedor session (D-16): 201, buyer = session user, key forwarded', async () => {
+    const response = await post('vendedor')
+      .set('Idempotency-Key', KEY)
+      .send(BODY)
+      .expect(201);
+    expect(response.body).toEqual(ORDER);
+    expect(checkoutWithOptionalKey).toHaveBeenCalledTimes(1);
+    expect(checkoutWithOptionalKey).toHaveBeenCalledWith(
+      SELLER_ID,
+      expect.objectContaining({ items: BODY.items }),
+      KEY,
+    );
+  });
 
   it('customer without the header: legacy path (service receives no key), 201', async () => {
     const response = await post('cliente').send(BODY).expect(201);
