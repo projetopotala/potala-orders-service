@@ -3,20 +3,24 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
 import { ReturnsService } from './returns.service';
@@ -31,6 +35,11 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user';
 import { Role } from '../../common/types/identity-enums';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENT_REPLAYED_HEADER,
+} from '../../common/constants/orders.constants';
+import { CheckoutIdempotencyReplayedErrorException } from './checkout-idempotency.service';
 
 /**
  * Every route here is a BUYER route: Role.CUSTOMER or Role.SELLER. A seller
@@ -80,11 +89,47 @@ export class OrdersController {
     status: HttpStatus.SERVICE_UNAVAILABLE,
     description: 'catalog-service or the payment gateway is unreachable.',
   })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description:
+      'F2.1 -- one key per purchase attempt (UUID recommended; 16-128 chars of [A-Za-z0-9._:-]). Reusing it with the same payload returns the order already created (201 + Idempotent-Replayed: true) or the same stored error (also with Idempotent-Replayed: true), never a second order. Omitted: legacy behavior, no protection against retries. See docs/checkout-idempotency.md.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'Also: a checkout with the same Idempotency-Key is still in progress -- retry the same request shortly.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      'Idempotency-Key already used with a different payload -- generate a new key for a new purchase.',
+  })
   async checkout(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCheckoutDto,
+    @Headers(IDEMPOTENCY_KEY_HEADER) idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.ordersService.checkout(user.id, dto);
+    try {
+      const { order, replayed } =
+        await this.ordersService.checkoutWithOptionalKey(
+          user.id,
+          dto,
+          idempotencyKey,
+        );
+      if (replayed) {
+        response.setHeader(IDEMPOTENT_REPLAYED_HEADER, 'true');
+      }
+      return order;
+    } catch (error) {
+      // Erro repetido de uma chave FAILED: mesmo status/corpo, marcado como
+      // repetição (o filtro global de exceções escreve nesta mesma resposta).
+      if (error instanceof CheckoutIdempotencyReplayedErrorException) {
+        response.setHeader(IDEMPOTENT_REPLAYED_HEADER, 'true');
+      }
+      throw error;
+    }
   }
 
   @Get()

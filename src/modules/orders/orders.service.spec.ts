@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { OrdersService } from './orders.service';
+import { CheckoutIdempotencyService } from './checkout-idempotency.service';
 import {
   createCatalogServiceClientMock,
   createCouponsServiceMock,
@@ -75,6 +76,10 @@ function setUpHappyPath() {
     customerId: CUSTOMER_ID,
   });
   prisma.sellerOrder.create.mockResolvedValue({ id: 'seller-order-1' });
+  // F2.2A -- subpedidos do pedido no momento da finalização/cancelamento.
+  prisma.sellerOrder.findMany.mockResolvedValue([
+    { id: 'seller-order-1', sellerId: SELLER_A, status: 'PENDING' },
+  ]);
   prisma.orderItem.create.mockResolvedValue({ id: 'order-item-1' });
   prisma.paymentTransaction.create.mockResolvedValue({ id: 'payment-1' });
   prisma.order.findFirst.mockResolvedValue({
@@ -93,6 +98,7 @@ function setUpHappyPath() {
     catalogServiceClient as never,
     paymentGateway as never,
     couponsService as never,
+    new CheckoutIdempotencyService(prisma as never),
   );
 
   return { service, prisma, catalogServiceClient, paymentGateway, couponsService };
@@ -176,9 +182,10 @@ describe('OrdersService', () => {
         amountCents: 2000,
         splits: [{ sellerId: SELLER_A, amountCents: 2000 }],
       });
-      expect(prisma.paymentTransaction.update).toHaveBeenCalledWith(
+      // F2.2A -- cada escrita é condicionada ao status anterior esperado.
+      expect(prisma.paymentTransaction.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: 'payment-1' },
+          where: { id: 'payment-1', status: 'PENDING' },
           data: expect.objectContaining({
             status: 'APPROVED',
             provider: 'mock',
@@ -186,12 +193,17 @@ describe('OrdersService', () => {
           }),
         }),
       );
-      expect(prisma.order.update).toHaveBeenCalledWith({
-        where: { id: 'order-1' },
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'order-1', status: 'PENDING_PAYMENT' },
         data: { status: 'PAID' },
       });
       expect(prisma.sellerOrder.updateMany).toHaveBeenCalledWith({
-        where: { orderId: 'order-1' },
+        where: {
+          id: 'seller-order-1',
+          orderId: 'order-1',
+          sellerId: SELLER_A,
+          status: 'PENDING',
+        },
         data: { status: 'CONFIRMED' },
       });
       expect(catalogServiceClient.commitInventory).toHaveBeenCalledWith([
@@ -275,8 +287,8 @@ describe('OrdersService', () => {
       await expect(service.checkout(CUSTOMER_ID, checkoutDto())).rejects.toBe(
         reserveError,
       );
-      expect(prisma.order.update).toHaveBeenCalledWith({
-        where: { id: 'order-1' },
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'order-1', status: 'PENDING_PAYMENT' },
         data: { status: 'CANCELLED' },
       });
       // Never reaches the payment step for a reservation that failed.
@@ -296,13 +308,14 @@ describe('OrdersService', () => {
 
       const result = await service.checkout(CUSTOMER_ID, checkoutDto());
 
-      expect(prisma.paymentTransaction.update).toHaveBeenCalledWith(
+      expect(prisma.paymentTransaction.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
+          where: { id: 'payment-1', status: 'PENDING' },
           data: expect.objectContaining({ status: 'FAILED' }),
         }),
       );
-      expect(prisma.order.update).toHaveBeenCalledWith({
-        where: { id: 'order-1' },
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'order-1', status: 'PENDING_PAYMENT' },
         data: { status: 'CANCELLED' },
       });
       expect(catalogServiceClient.releaseInventory).toHaveBeenCalledWith([
@@ -325,8 +338,8 @@ describe('OrdersService', () => {
         service.checkout(CUSTOMER_ID, checkoutDto()),
       ).rejects.toBeInstanceOf(ServiceUnavailableException);
 
-      expect(prisma.order.update).toHaveBeenCalledWith({
-        where: { id: 'order-1' },
+      expect(prisma.order.updateMany).toHaveBeenCalledWith({
+        where: { id: 'order-1', status: 'PENDING_PAYMENT' },
         data: { status: 'CANCELLED' },
       });
       expect(catalogServiceClient.releaseInventory).toHaveBeenCalledWith([
@@ -577,14 +590,13 @@ describe('OrdersService', () => {
     for (const { method, from, to } of CASES) {
       it(`${method}: ${from} -> ${to} when the seller order is ${from}`, async () => {
         const { service, prisma } = setUpHappyPath();
-        prisma.sellerOrder.findFirst.mockResolvedValue({
-          id: 'seller-order-1',
-          status: from,
-        });
-        prisma.sellerOrder.update.mockResolvedValue({
-          id: 'seller-order-1',
-          status: to,
-        });
+        prisma.sellerOrder.findFirst
+          .mockResolvedValueOnce({
+            id: 'seller-order-1',
+            status: from,
+            orderId: 'order-1',
+          })
+          .mockResolvedValueOnce({ id: 'seller-order-1', status: to });
 
         const result = await service[method](SELLER_A, 'seller-order-1');
 
@@ -593,12 +605,17 @@ describe('OrdersService', () => {
             where: { id: 'seller-order-1', sellerId: SELLER_A },
           }),
         );
-        expect(prisma.sellerOrder.update).toHaveBeenCalledWith(
-          expect.objectContaining({
-            where: { id: 'seller-order-1' },
-            data: { status: to },
-          }),
-        );
+        // F2.2A -- UPDATE condicional ao status esperado, escopado à loja.
+        expect(prisma.sellerOrder.updateMany).toHaveBeenCalledWith({
+          where: {
+            id: 'seller-order-1',
+            orderId: 'order-1',
+            sellerId: SELLER_A,
+            status: from,
+          },
+          data: { status: to },
+        });
+        expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
         expect(result).toEqual({ id: 'seller-order-1', status: to });
       });
 
@@ -610,6 +627,8 @@ describe('OrdersService', () => {
           service[method](SELLER_A, 'someone-elses-seller-order'),
         ).rejects.toBeInstanceOf(NotFoundException);
         expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+        expect(prisma.sellerOrder.updateMany).not.toHaveBeenCalled();
+        expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
       });
 
       it(`${method}: 409 when the seller order is not ${from}`, async () => {
@@ -623,6 +642,8 @@ describe('OrdersService', () => {
           service[method](SELLER_A, 'seller-order-1'),
         ).rejects.toBeInstanceOf(ConflictException);
         expect(prisma.sellerOrder.update).not.toHaveBeenCalled();
+        expect(prisma.sellerOrder.updateMany).not.toHaveBeenCalled();
+        expect(prisma.orderStatusHistory.create).not.toHaveBeenCalled();
       });
     }
   });
