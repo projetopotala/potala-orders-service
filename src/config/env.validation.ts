@@ -270,5 +270,8 @@ export function validateEnv(env: Record<string, unknown>): AppConfig {
         60_000,
       ),
     },
+    permissionShadow: {
+      enabled: optionalBoolean(env, 'PERMISSION_SHADOW_MODE', false),
+    },
   };
 }

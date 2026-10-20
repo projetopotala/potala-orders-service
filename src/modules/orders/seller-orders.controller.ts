@@ -100,7 +100,11 @@ export class SellerOrdersController {
     @CurrentSeller() seller: SellerContext,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
   ) {
-    return this.ordersService.prepareForSeller(seller.sellerId, id);
+    return this.ordersService.prepareForSeller(
+      seller.sellerId,
+      id,
+      seller.userId,
+    );
   }
 
   @Patch(':id/ship')
@@ -114,7 +118,7 @@ export class SellerOrdersController {
     @CurrentSeller() seller: SellerContext,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
   ) {
-    return this.ordersService.shipForSeller(seller.sellerId, id);
+    return this.ordersService.shipForSeller(seller.sellerId, id, seller.userId);
   }
 
   @Patch(':id/deliver')
@@ -128,6 +132,10 @@ export class SellerOrdersController {
     @CurrentSeller() seller: SellerContext,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
   ) {
-    return this.ordersService.deliverForSeller(seller.sellerId, id);
+    return this.ordersService.deliverForSeller(
+      seller.sellerId,
+      id,
+      seller.userId,
+    );
   }
 }

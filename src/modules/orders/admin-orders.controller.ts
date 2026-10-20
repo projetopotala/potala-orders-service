@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { RequirePermission } from '../../common/permissions/require-permission.decorator';
 import { Role } from '../../common/types/identity-enums';
 
 /**
@@ -26,6 +27,7 @@ export class AdminOrdersController {
     summary:
       'Lists SellerOrder rows across every store, newest first (marketplace-wide, admin only).',
   })
+  @RequirePermission('orders:order:read', { mode: 'COLLECTION' })
   list(@Query() query: PaginationQueryDto) {
     return this.ordersService.listForAdmin(query);
   }

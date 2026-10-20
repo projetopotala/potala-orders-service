@@ -31,6 +31,25 @@ export const MAX_SHIPPING_POSTAL_CODE_LENGTH = 20;
 /** Whole-transaction retries when another request took the order number between generation and insert. */
 export const MAX_ORDER_NUMBER_RETRIES = 3;
 
+/**
+ * F2.1 -- idempotência do checkout (header `Idempotency-Key`). A chave é
+ * opaca para o servidor; o frontend usa um UUID v4 por tentativa de compra.
+ * 16..128 caracteres de um alfabeto sem espaço nem vírgula (cabeçalhos
+ * repetidos chegam unidos por ", " e são recusados por este padrão).
+ */
+export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
+export const IDEMPOTENT_REPLAYED_HEADER = 'Idempotent-Replayed';
+export const CHECKOUT_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
+/**
+ * Validade da posse de uma chave ANTES de o pedido existir (resolução no
+ * catalog-service + cupom). Vencida sem pedido criado, a chave pode ser
+ * retomada por um retry; depois que o pedido existe, ela nunca é
+ * reexecutada. Folga ampla sobre CATALOG_SERVICE_TIMEOUT_MS (padrão 5 s).
+ */
+export const CHECKOUT_IDEMPOTENCY_LEASE_MS = 60_000;
+/** Tentativas de reler/retomar uma chave disputada antes de responder 409. */
+export const CHECKOUT_IDEMPOTENCY_MAX_CLAIM_ATTEMPTS = 3;
+
 // --- Reviews (Fase B do roadmap pos-entrega, ver roadmap-mercado-livre.md) ---
 export const MIN_REVIEW_RATING = 1;
 export const MAX_REVIEW_RATING = 5;

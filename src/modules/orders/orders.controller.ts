@@ -3,20 +3,24 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { OrdersService } from './orders.service';
 import { ReviewsService } from './reviews.service';
 import { ReturnsService } from './returns.service';
@@ -31,19 +35,30 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user';
 import { Role } from '../../common/types/identity-enums';
+import {
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENT_REPLAYED_HEADER,
+} from '../../common/constants/orders.constants';
+import { CheckoutIdempotencyReplayedErrorException } from './checkout-idempotency.service';
 
 /**
- * Every route here is customer-only (Role.CUSTOMER) — there is no seller or
- * admin view of orders in this controller. Sellers see their own
- * (read-only) SellerOrder rows through SellerOrdersController instead — see
- * seller-orders.controller.ts. SessionAuthGuard and RolesGuard are both
- * registered as APP_GUARD in app.module.ts, so neither guard is repeated
- * here.
+ * Every route here is a BUYER route: Role.CUSTOMER or Role.SELLER. A seller
+ * account (identity-service gives it ONLY the SELLER role -- never CUSTOMER,
+ * see AuthService.registerSeller) must be able to buy with the same
+ * account. The buyer is always identified by `user.id` from the session
+ * (never from the request body) and every query is scoped by it, so a
+ * seller only ever sees the orders/reviews/returns/favorites/coupons they
+ * bought. ADMIN is deliberately NOT allowed here. There is still no
+ * seller-side view of orders in this controller: sellers see the
+ * (read-only) SellerOrder rows of what they SELL through
+ * SellerOrdersController instead — see seller-orders.controller.ts.
+ * SessionAuthGuard and RolesGuard are both registered as APP_GUARD in
+ * app.module.ts, so neither guard is repeated here.
  */
 @ApiTags('orders')
 @ApiBearerAuth()
 @Controller('orders')
-@Roles(Role.CUSTOMER)
+@Roles(Role.CUSTOMER, Role.SELLER)
 export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
@@ -74,11 +89,47 @@ export class OrdersController {
     status: HttpStatus.SERVICE_UNAVAILABLE,
     description: 'catalog-service or the payment gateway is unreachable.',
   })
+  @ApiHeader({
+    name: 'Idempotency-Key',
+    required: false,
+    description:
+      'F2.1 -- one key per purchase attempt (UUID recommended; 16-128 chars of [A-Za-z0-9._:-]). Reusing it with the same payload returns the order already created (201 + Idempotent-Replayed: true) or the same stored error (also with Idempotent-Replayed: true), never a second order. Omitted: legacy behavior, no protection against retries. See docs/checkout-idempotency.md.',
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      'Also: a checkout with the same Idempotency-Key is still in progress -- retry the same request shortly.',
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      'Idempotency-Key already used with a different payload -- generate a new key for a new purchase.',
+  })
   async checkout(
     @CurrentUser() user: AuthenticatedUser,
     @Body() dto: CreateCheckoutDto,
+    @Headers(IDEMPOTENCY_KEY_HEADER) idempotencyKey: string | undefined,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.ordersService.checkout(user.id, dto);
+    try {
+      const { order, replayed } =
+        await this.ordersService.checkoutWithOptionalKey(
+          user.id,
+          dto,
+          idempotencyKey,
+        );
+      if (replayed) {
+        response.setHeader(IDEMPOTENT_REPLAYED_HEADER, 'true');
+      }
+      return order;
+    } catch (error) {
+      // Erro repetido de uma chave FAILED: mesmo status/corpo, marcado como
+      // repetição (o filtro global de exceções escreve nesta mesma resposta).
+      if (error instanceof CheckoutIdempotencyReplayedErrorException) {
+        response.setHeader(IDEMPOTENT_REPLAYED_HEADER, 'true');
+      }
+      throw error;
+    }
   }
 
   @Get()

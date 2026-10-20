@@ -10,6 +10,8 @@ import {
 import { randomBytes } from 'crypto';
 import {
   OrderStatus,
+  OrderStatusHistoryActorType,
+  OrderStatusHistorySource,
   Prisma,
   SellerOrderStatus,
   PaymentTransactionStatus,
@@ -38,6 +40,15 @@ import {
 } from '../../common/constants/orders.constants';
 import { CreateCheckoutDto, ShippingAddressDto } from './dto/create-checkout.dto';
 import { CouponsService } from './coupons.service';
+import {
+  CheckoutIdempotencyHandle,
+  CheckoutIdempotencyService,
+} from './checkout-idempotency.service';
+import {
+  ORDER_TRANSITION_REASON,
+  OrderTransitionContext,
+  OrderTransitionsService,
+} from './order-transitions.service';
 
 type ValidatedItem = {
   productId: string;
@@ -55,6 +66,33 @@ type SellerGroup = {
   items: ValidatedItem[];
   subtotalCents: number;
 };
+
+/**
+ * F2.2A -- resultado de uma finalização de pagamento (aprovado/recusado):
+ * - APPLIED: esta chamada mudou PaymentTransaction, Order e SellerOrders;
+ * - ALREADY_FINALIZED: a PaymentTransaction já não estava PENDING
+ *   (webhook repetido/concorrente) -- nada muda, nenhum efeito externo;
+ * - ORDER_STATE_MISMATCH: a transação de pagamento foi registrada (fato do
+ *   provedor, com provider/providerRef), mas o pedido já não estava
+ *   PENDING_PAYMENT ou nem todos os subpedidos estavam PENDING -- pedido e
+ *   subpedidos NÃO são alterados e nenhum efeito de estoque é disparado
+ *   (fica para a reconciliação, F2.2C).
+ */
+type PaymentFinalizationOutcome =
+  'APPLIED' | 'ALREADY_FINALIZED' | 'ORDER_STATE_MISMATCH';
+
+/** Mesmo shape devolvido pelas transições de fulfillment do vendedor desde a v1. */
+const SELLER_ORDER_WITH_ORDER_SUMMARY = {
+  items: true,
+  order: {
+    select: {
+      orderNumber: true,
+      status: true,
+      createdAt: true,
+      shippingAddress: true,
+    },
+  },
+} satisfies Prisma.SellerOrderInclude;
 
 /**
  * The only genuinely new business logic in this migration (see README.md):
@@ -77,6 +115,10 @@ export class OrdersService {
     @Inject(PAYMENT_GATEWAY_CLIENT)
     private readonly paymentGateway: PaymentGatewayClient,
     private readonly couponsService: CouponsService,
+    private readonly checkoutIdempotency: CheckoutIdempotencyService,
+    // F2.2A -- sem estado; o default mantém compatíveis os testes que
+    // constroem OrdersService à mão (Nest injeta o provider registrado).
+    private readonly transitions: OrderTransitionsService = new OrderTransitionsService(),
   ) {}
 
   async listForCustomer(customerId: string, query: PaginationQueryDto = {}) {
@@ -219,7 +261,7 @@ export class OrdersService {
   ) {
     const sellerOrder = await this.prisma.sellerOrder.findFirst({
       where: { id: sellerOrderId, sellerId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, orderId: true },
     });
     if (!sellerOrder) {
       throw new NotFoundException('Seller order not found');
@@ -227,24 +269,51 @@ export class OrdersService {
     return sellerOrder;
   }
 
-  private async updateSellerOrderStatus(
+  /**
+   * F2.2A -- um passo de fulfillment do vendedor: pré-checagem (404 de
+   * outra loja, 409 com a mensagem de sempre) e, numa transação curta sem
+   * chamada externa, o UPDATE condicional ao status esperado + o histórico.
+   * Se o status mudou entre a leitura e o UPDATE (dois cliques/abas), o
+   * UPDATE não acerta a linha e a resposta é o mesmo 409 -- sem evento.
+   */
+  private async advanceSellerOrder(
+    sellerId: string,
     sellerOrderId: string,
-    status: SellerOrderStatus,
+    from: SellerOrderStatus,
+    to: SellerOrderStatus,
+    conflictMessage: string,
+    actorUserId: string | null,
   ) {
-    return this.prisma.sellerOrder.update({
-      where: { id: sellerOrderId },
-      data: { status },
-      include: {
-        items: true,
-        order: {
-          select: {
-            orderNumber: true,
-            status: true,
-            createdAt: true,
-            shippingAddress: true,
-          },
+    const existing = await this.requireSellerOrderForStatusUpdate(
+      sellerId,
+      sellerOrderId,
+    );
+    if (existing.status !== from) {
+      throw new ConflictException(conflictMessage);
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const moved = await this.transitions.transitionSellerOrder(
+        tx,
+        { sellerOrderId, orderId: existing.orderId, sellerId },
+        from,
+        to,
+        {
+          source: OrderStatusHistorySource.SELLER,
+          actorType: OrderStatusHistoryActorType.SELLER,
+          actorId: actorUserId,
         },
-      },
+      );
+      if (!moved) {
+        throw new ConflictException(conflictMessage);
+      }
+      const updated = await tx.sellerOrder.findFirst({
+        where: { id: sellerOrderId, sellerId },
+        include: SELLER_ORDER_WITH_ORDER_SUMMARY,
+      });
+      if (!updated) {
+        throw new NotFoundException('Seller order not found');
+      }
+      return updated;
     });
   }
 
@@ -279,54 +348,54 @@ export class OrdersService {
     );
   }
 
-  /** CONFIRMED -> PREPARING. */
-  async prepareForSeller(sellerId: string, sellerOrderId: string) {
-    const existing = await this.requireSellerOrderForStatusUpdate(
+  /**
+   * CONFIRMED -> PREPARING. `actorUserId` = usuário da loja que executou
+   * (vai só para o histórico; opcional para não quebrar chamadores).
+   */
+  async prepareForSeller(
+    sellerId: string,
+    sellerOrderId: string,
+    actorUserId: string | null = null,
+  ) {
+    return this.advanceSellerOrder(
       sellerId,
       sellerOrderId,
-    );
-    if (existing.status !== SellerOrderStatus.CONFIRMED) {
-      throw new ConflictException(
-        'Only CONFIRMED seller orders can start preparing',
-      );
-    }
-    return this.updateSellerOrderStatus(
-      sellerOrderId,
+      SellerOrderStatus.CONFIRMED,
       SellerOrderStatus.PREPARING,
+      'Only CONFIRMED seller orders can start preparing',
+      actorUserId,
     );
   }
 
   /** PREPARING -> SHIPPED. */
-  async shipForSeller(sellerId: string, sellerOrderId: string) {
-    const existing = await this.requireSellerOrderForStatusUpdate(
+  async shipForSeller(
+    sellerId: string,
+    sellerOrderId: string,
+    actorUserId: string | null = null,
+  ) {
+    return this.advanceSellerOrder(
       sellerId,
       sellerOrderId,
-    );
-    if (existing.status !== SellerOrderStatus.PREPARING) {
-      throw new ConflictException(
-        'Only PREPARING seller orders can be shipped',
-      );
-    }
-    return this.updateSellerOrderStatus(
-      sellerOrderId,
+      SellerOrderStatus.PREPARING,
       SellerOrderStatus.SHIPPED,
+      'Only PREPARING seller orders can be shipped',
+      actorUserId,
     );
   }
 
   /** SHIPPED -> DELIVERED. Terminal nesta v1 (sem "desfazer"). */
-  async deliverForSeller(sellerId: string, sellerOrderId: string) {
-    const existing = await this.requireSellerOrderForStatusUpdate(
+  async deliverForSeller(
+    sellerId: string,
+    sellerOrderId: string,
+    actorUserId: string | null = null,
+  ) {
+    return this.advanceSellerOrder(
       sellerId,
       sellerOrderId,
-    );
-    if (existing.status !== SellerOrderStatus.SHIPPED) {
-      throw new ConflictException(
-        'Only SHIPPED seller orders can be marked delivered',
-      );
-    }
-    return this.updateSellerOrderStatus(
-      sellerOrderId,
+      SellerOrderStatus.SHIPPED,
       SellerOrderStatus.DELIVERED,
+      'Only SHIPPED seller orders can be marked delivered',
+      actorUserId,
     );
   }
 
@@ -370,7 +439,72 @@ export class OrdersService {
     return buildPage(rows, limit);
   }
 
+  /** Checkout sem Idempotency-Key -- comportamento anterior, inalterado. */
   async checkout(customerId: string, dto: CreateCheckoutDto) {
+    return this.runCheckout(customerId, dto, null);
+  }
+
+  /**
+   * F2.1 -- checkout com Idempotency-Key (ver CheckoutIdempotencyService e
+   * docs/checkout-idempotency.md). A mesma chave, do mesmo cliente e com o
+   * mesmo payload, nunca cria um segundo pedido: o retry recebe o pedido já
+   * criado (`replayed: true`) ou o mesmo erro, sem nova reserva de estoque
+   * nem nova cobrança.
+   */
+  async checkoutIdempotent(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    idempotencyKey: string,
+  ): Promise<{
+    order: Awaited<ReturnType<OrdersService['getForCustomer']>>;
+    replayed: boolean;
+  }> {
+    const claim = await this.checkoutIdempotency.begin(
+      customerId,
+      idempotencyKey,
+      dto,
+    );
+    if (claim.kind === 'replay') {
+      return {
+        order: await this.getForCustomer(customerId, claim.orderId),
+        replayed: true,
+      };
+    }
+    try {
+      const order = await this.runCheckout(customerId, dto, claim.handle);
+      await this.checkoutIdempotency.complete(claim.handle);
+      return { order, replayed: false };
+    } catch (error) {
+      await this.checkoutIdempotency.fail(claim.handle, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Ponto de entrada do controller: header Idempotency-Key ausente ->
+   * checkout anterior (compatibilidade com clientes que ainda não enviam a
+   * chave); presente -> validado (400 se inválido) e idempotente.
+   */
+  async checkoutWithOptionalKey(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    rawIdempotencyKey: unknown,
+  ): Promise<{
+    order: Awaited<ReturnType<OrdersService['getForCustomer']>>;
+    replayed: boolean;
+  }> {
+    const key = this.checkoutIdempotency.parseKey(rawIdempotencyKey);
+    if (key === null) {
+      return { order: await this.checkout(customerId, dto), replayed: false };
+    }
+    return this.checkoutIdempotent(customerId, dto, key);
+  }
+
+  private async runCheckout(
+    customerId: string,
+    dto: CreateCheckoutDto,
+    idempotency: CheckoutIdempotencyHandle | null,
+  ) {
     const validatedItems = await this.resolveAndValidateItems(dto.items);
     const sellerGroups = this.groupBySeller(validatedItems);
     const subtotalCents = this.sum(sellerGroups.map((group) => group.subtotalCents));
@@ -398,7 +532,13 @@ export class OrdersService {
       { subtotalCents, shippingCents, discountCents, totalCents },
       sellerGroups,
       couponId,
+      idempotency,
     );
+    if (idempotency) {
+      // A transação acima vinculou o pedido à chave (attachOrder) e foi
+      // confirmada: a partir daqui um retry nunca reexecuta este checkout.
+      idempotency.orderId = order.id;
+    }
 
     const inventoryItems: InventoryItemInput[] = validatedItems.map((item) => ({
       variantId: item.variantId,
@@ -413,7 +553,16 @@ export class OrdersService {
     try {
       await this.catalogServiceClient.reserveInventory(inventoryItems);
     } catch (error) {
-      await this.markOrderCancelled(order.id);
+      const cancelled = await this.cancelPendingOrder(order.id, {
+        source: OrderStatusHistorySource.CHECKOUT,
+        actorType: OrderStatusHistoryActorType.SYSTEM,
+        reason: ORDER_TRANSITION_REASON.INVENTORY_RESERVATION_FAILED,
+      });
+      if (!cancelled) {
+        this.logger.warn(
+          `Order ${order.orderNumber} not cancelled after the inventory reservation failed: order/sub-orders were not all awaiting payment -- left unchanged; needs reconciliation.`,
+        );
+      }
       throw error;
     }
 
@@ -448,7 +597,13 @@ export class OrdersService {
       this.logger.error(
         `Payment gateway threw for order ${order.orderNumber}: ${(error as Error).message}`,
       );
-      await this.finalizeFailedPayment(order.id, paymentTransaction.id, inventoryItems);
+      await this.finalizeFailedPayment(
+        order.id,
+        paymentTransaction.id,
+        inventoryItems,
+        OrderStatusHistorySource.PAYMENT_CHECKOUT,
+        ORDER_TRANSITION_REASON.PAYMENT_GATEWAY_UNAVAILABLE,
+      );
       throw new ServiceUnavailableException(
         'Payment gateway is unavailable. Try again shortly.',
       );
@@ -460,12 +615,15 @@ export class OrdersService {
         paymentTransaction.id,
         chargeResult,
         inventoryItems,
+        OrderStatusHistorySource.PAYMENT_CHECKOUT,
       );
     } else if (chargeResult.status === 'FAILED') {
       await this.finalizeFailedPayment(
         order.id,
         paymentTransaction.id,
         inventoryItems,
+        OrderStatusHistorySource.PAYMENT_CHECKOUT,
+        ORDER_TRANSITION_REASON.PAYMENT_DECLINED,
         chargeResult,
       );
     } else {
@@ -529,12 +687,15 @@ export class OrdersService {
         paymentTransaction.id,
         chargeResult,
         inventoryItems,
+        OrderStatusHistorySource.PAYMENT_WEBHOOK,
       );
     } else {
       await this.finalizeFailedPayment(
         paymentTransaction.orderId,
         paymentTransaction.id,
         inventoryItems,
+        OrderStatusHistorySource.PAYMENT_WEBHOOK,
+        ORDER_TRANSITION_REASON.PAYMENT_DECLINED,
         chargeResult,
       );
     }
@@ -638,6 +799,7 @@ export class OrdersService {
     },
     sellerGroups: SellerGroup[],
     couponId: string | null,
+    idempotency: CheckoutIdempotencyHandle | null = null,
   ) {
     for (let attempt = 0; attempt <= MAX_ORDER_NUMBER_RETRIES; attempt += 1) {
       const orderNumber = this.generateOrderNumber();
@@ -651,6 +813,7 @@ export class OrdersService {
             totals,
             sellerGroups,
             couponId,
+            idempotency,
           ),
         );
       } catch (error) {
@@ -683,6 +846,7 @@ export class OrdersService {
     },
     sellerGroups: SellerGroup[],
     couponId: string | null,
+    idempotency: CheckoutIdempotencyHandle | null = null,
   ) {
     // Dentro da mesma transação que cria o Order: se o número de pedido
     // colidir e esta tentativa for descartada, o rollback desfaz este
@@ -716,6 +880,20 @@ export class OrdersService {
       },
     });
 
+    // F2.2A -- eventos de criação na MESMA transação: colisão de número de
+    // pedido ou attachOrder (F2.1) desfazem pedido e histórico juntos.
+    const creation: OrderTransitionContext = {
+      source: OrderStatusHistorySource.CHECKOUT,
+      actorType: OrderStatusHistoryActorType.CUSTOMER,
+      actorId: customerId,
+    };
+    await this.transitions.recordOrderCreated(
+      tx,
+      order.id,
+      OrderStatus.PENDING_PAYMENT,
+      creation,
+    );
+
     for (const group of sellerGroups) {
       const sellerOrder = await tx.sellerOrder.create({
         data: {
@@ -729,6 +907,16 @@ export class OrdersService {
           sellerNetCents: 0,
         },
       });
+      await this.transitions.recordSellerOrderCreated(
+        tx,
+        {
+          sellerOrderId: sellerOrder.id,
+          orderId: order.id,
+          sellerId: group.sellerId,
+        },
+        SellerOrderStatus.PENDING,
+        creation,
+      );
 
       for (const item of group.items) {
         await tx.orderItem.create({
@@ -746,40 +934,145 @@ export class OrdersService {
       }
     }
 
+    // F2.1 -- vincula o pedido à chave de idempotência na MESMA transação:
+    // se outra execução retomou a chave, attachOrder lança e tudo acima
+    // (pedido, subpedidos, itens, uso de cupom) é desfeito.
+    if (idempotency) {
+      await this.checkoutIdempotency.attachOrder(tx, idempotency, order.id);
+    }
+
     return order;
   }
 
-  private async markOrderCancelled(orderId: string): Promise<void> {
-    await this.prisma.order.update({
-      where: { id: orderId },
-      data: { status: OrderStatus.CANCELLED },
+  /**
+   * F2.2A (D-A1) -- cancela um pedido que ainda está PENDING_PAYMENT e, na
+   * mesma transação, os subpedidos que ainda estão PENDING (só eles: nunca
+   * um subpedido confirmado, enviado ou entregue). Usado só nas falhas
+   * internas do checkout/pagamento. Não chama catálogo nem gateway.
+   * false = o pedido já não estava PENDING_PAYMENT ou nem todos os
+   * subpedidos estavam PENDING (nada foi alterado: um pedido nunca é
+   * cancelado deixando um subpedido confirmado/enviado para trás).
+   */
+  private async cancelPendingOrder(
+    orderId: string,
+    context: OrderTransitionContext,
+  ): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      if (
+        !(await this.transitions.allSellerOrdersIn(
+          tx,
+          orderId,
+          SellerOrderStatus.PENDING,
+        ))
+      ) {
+        return false;
+      }
+      const cancelled = await this.transitions.transitionOrder(
+        tx,
+        orderId,
+        OrderStatus.PENDING_PAYMENT,
+        OrderStatus.CANCELLED,
+        context,
+      );
+      if (!cancelled) {
+        return false;
+      }
+      await this.transitions.transitionAllSellerOrdersOfOrder(
+        tx,
+        orderId,
+        SellerOrderStatus.PENDING,
+        SellerOrderStatus.CANCELLED,
+        context,
+      );
+      return true;
     });
   }
 
+  /**
+   * Pagamento aprovado (checkout síncrono ou webhook). F2.2A (D-A2): tudo
+   * condicionado ao estado esperado, na mesma transação curta --
+   * PaymentTransaction PENDING -> APPROVED, Order PENDING_PAYMENT -> PAID,
+   * SellerOrders PENDING -> CONFIRMED, com histórico. Só depois do commit,
+   * e só se ESTA chamada aplicou a aprovação, o estoque é baixado no
+   * catálogo: webhook repetido/concorrente não baixa duas vezes, e uma
+   * aprovação para pedido que não está mais aguardando pagamento nunca o
+   * transforma em PAID (fica registrada na PaymentTransaction e no log).
+   */
   private async finalizeApprovedPayment(
     orderId: string,
     paymentTransactionId: string,
     chargeResult: PaymentChargeResult,
     inventoryItems: InventoryItemInput[],
-  ): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.paymentTransaction.update({
-        where: { id: paymentTransactionId },
-        data: {
-          status: PaymentTransactionStatus.APPROVED,
-          provider: chargeResult.provider,
-          providerRef: chargeResult.providerRef,
-        },
-      }),
-      this.prisma.order.update({
-        where: { id: orderId },
-        data: { status: OrderStatus.PAID },
-      }),
-      this.prisma.sellerOrder.updateMany({
-        where: { orderId },
-        data: { status: SellerOrderStatus.CONFIRMED },
-      }),
-    ]);
+    source: OrderStatusHistorySource,
+  ): Promise<PaymentFinalizationOutcome> {
+    const outcome = await this.prisma.$transaction(
+      async (tx): Promise<PaymentFinalizationOutcome> => {
+        const payment = await tx.paymentTransaction.updateMany({
+          where: {
+            id: paymentTransactionId,
+            status: PaymentTransactionStatus.PENDING,
+          },
+          data: {
+            status: PaymentTransactionStatus.APPROVED,
+            provider: chargeResult.provider,
+            providerRef: chargeResult.providerRef,
+          },
+        });
+        if (payment.count !== 1) {
+          return 'ALREADY_FINALIZED';
+        }
+        if (
+          !(await this.transitions.allSellerOrdersIn(
+            tx,
+            orderId,
+            SellerOrderStatus.PENDING,
+          ))
+        ) {
+          return 'ORDER_STATE_MISMATCH';
+        }
+        const context: OrderTransitionContext = {
+          source,
+          actorType: OrderStatusHistoryActorType.SYSTEM,
+          reason: ORDER_TRANSITION_REASON.PAYMENT_APPROVED,
+        };
+        const paid = await this.transitions.transitionOrder(
+          tx,
+          orderId,
+          OrderStatus.PENDING_PAYMENT,
+          OrderStatus.PAID,
+          context,
+        );
+        if (!paid) {
+          return 'ORDER_STATE_MISMATCH';
+        }
+        await this.transitions.transitionAllSellerOrdersOfOrder(
+          tx,
+          orderId,
+          SellerOrderStatus.PENDING,
+          SellerOrderStatus.CONFIRMED,
+          context,
+        );
+        return 'APPLIED';
+      },
+    );
+
+    if (outcome === 'ALREADY_FINALIZED') {
+      this.logger.log(
+        `Approval for payment transaction ${paymentTransactionId} ignored -- already finalized (duplicate delivery).`,
+      );
+      return outcome;
+    }
+    if (outcome === 'ORDER_STATE_MISMATCH') {
+      // Depende da F2.2C (reconciliação): pagamento aprovado registrado para
+      // um pedido que já não aguardava pagamento (ou com subpedido fora de
+      // PENDING). Nada é alterado no pedido nem nos subpedidos e nenhum
+      // estoque é baixado; detectável por SQL (transação APPROVED com
+      // pedido diferente de PAID).
+      this.logger.error(
+        `Approved payment transaction ${paymentTransactionId} for order ${orderId}, whose order/sub-orders are not all awaiting payment -- left unchanged, stock not committed; needs reconciliation.`,
+      );
+      return outcome;
+    }
 
     try {
       await this.catalogServiceClient.commitInventory(inventoryItems);
@@ -793,28 +1086,87 @@ export class OrdersService {
         `commitInventory failed for order ${orderId} after an approved payment: ${(error as Error).message}`,
       );
     }
+    return outcome;
   }
 
+  /**
+   * Pagamento recusado (ou gateway indisponível no checkout). Mesmas
+   * garantias de finalizeApprovedPayment: PaymentTransaction PENDING ->
+   * FAILED, Order PENDING_PAYMENT -> CANCELLED e SellerOrders PENDING ->
+   * CANCELLED (D-A1), com histórico; o estoque só é liberado se ESTA
+   * chamada aplicou a recusa (nunca duas vezes).
+   */
   private async finalizeFailedPayment(
     orderId: string,
     paymentTransactionId: string,
     inventoryItems: InventoryItemInput[],
+    source: OrderStatusHistorySource,
+    reason: string,
     chargeResult?: PaymentChargeResult,
-  ): Promise<void> {
-    await this.prisma.$transaction([
-      this.prisma.paymentTransaction.update({
-        where: { id: paymentTransactionId },
-        data: {
-          status: PaymentTransactionStatus.FAILED,
-          provider: chargeResult?.provider,
-          providerRef: chargeResult?.providerRef,
-        },
-      }),
-      this.prisma.order.update({
-        where: { id: orderId },
-        data: { status: OrderStatus.CANCELLED },
-      }),
-    ]);
+  ): Promise<PaymentFinalizationOutcome> {
+    const outcome = await this.prisma.$transaction(
+      async (tx): Promise<PaymentFinalizationOutcome> => {
+        const payment = await tx.paymentTransaction.updateMany({
+          where: {
+            id: paymentTransactionId,
+            status: PaymentTransactionStatus.PENDING,
+          },
+          data: {
+            status: PaymentTransactionStatus.FAILED,
+            provider: chargeResult?.provider,
+            providerRef: chargeResult?.providerRef,
+          },
+        });
+        if (payment.count !== 1) {
+          return 'ALREADY_FINALIZED';
+        }
+        if (
+          !(await this.transitions.allSellerOrdersIn(
+            tx,
+            orderId,
+            SellerOrderStatus.PENDING,
+          ))
+        ) {
+          return 'ORDER_STATE_MISMATCH';
+        }
+        const context: OrderTransitionContext = {
+          source,
+          actorType: OrderStatusHistoryActorType.SYSTEM,
+          reason,
+        };
+        const cancelled = await this.transitions.transitionOrder(
+          tx,
+          orderId,
+          OrderStatus.PENDING_PAYMENT,
+          OrderStatus.CANCELLED,
+          context,
+        );
+        if (!cancelled) {
+          return 'ORDER_STATE_MISMATCH';
+        }
+        await this.transitions.transitionAllSellerOrdersOfOrder(
+          tx,
+          orderId,
+          SellerOrderStatus.PENDING,
+          SellerOrderStatus.CANCELLED,
+          context,
+        );
+        return 'APPLIED';
+      },
+    );
+
+    if (outcome === 'ALREADY_FINALIZED') {
+      this.logger.log(
+        `Failure for payment transaction ${paymentTransactionId} ignored -- already finalized (duplicate delivery).`,
+      );
+      return outcome;
+    }
+    if (outcome === 'ORDER_STATE_MISMATCH') {
+      this.logger.error(
+        `Failed payment transaction ${paymentTransactionId} for order ${orderId}, whose order/sub-orders are not all awaiting payment -- left unchanged, stock not released; needs reconciliation.`,
+      );
+      return outcome;
+    }
 
     try {
       await this.catalogServiceClient.releaseInventory(inventoryItems);
@@ -825,6 +1177,7 @@ export class OrdersService {
         `releaseInventory failed for order ${orderId} after a failed payment: ${(error as Error).message}`,
       );
     }
+    return outcome;
   }
 
   private generateOrderNumber(): string {

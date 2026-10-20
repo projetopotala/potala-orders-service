@@ -52,6 +52,15 @@ export interface AppConfig {
     apiKey: string;
     timeoutMs: number;
   };
+  /**
+   * F1.3 -- avaliação das permissões granulares (catálogo F1.2) em MODO
+   * SOMBRA. Só registra o que a futura política decidiria; nunca autoriza
+   * nem bloqueia. Padrão false (PERMISSION_SHADOW_MODE). Não existe modo
+   * de aplicação nesta fase: ativação real é a F1.6.
+   */
+  permissionShadow: {
+    enabled: boolean;
+  };
 }
 
 export const APP_CONFIG = 'APP_CONFIG';

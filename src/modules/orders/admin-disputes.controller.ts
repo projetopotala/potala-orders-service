@@ -19,6 +19,7 @@ import { RecordDisputeDecisionDto } from './dto/record-dispute-decision.dto';
 import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
+import { RequirePermission } from '../../common/permissions/require-permission.decorator';
 import { AuthenticatedUser } from '../../common/types/authenticated-user';
 import { Role } from '../../common/types/identity-enums';
 import { PostSaleActor } from '../../common/types/post-sale-actor';
@@ -48,6 +49,7 @@ export class AdminDisputesController {
   @ApiOperation({
     summary: 'Lists every dispute, across every store, newest first.',
   })
+  @RequirePermission('aftersales:dispute:read', { mode: 'COLLECTION' })
   async list(
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: PaginationQueryDto,
@@ -59,6 +61,7 @@ export class AdminDisputesController {
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOperation({ summary: 'Fetches one dispute.' })
   @ApiResponse({ status: 404, description: 'Dispute does not exist.' })
+  @RequirePermission('aftersales:dispute:read', { mode: 'SELLER_OWNED' })
   async getOne(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
@@ -75,6 +78,7 @@ export class AdminDisputesController {
     description:
       'This dispute has already been decided and can no longer receive a new decision.',
   })
+  @RequirePermission('aftersales:dispute:update', { mode: 'SELLER_OWNED' })
   async recordDecision(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
