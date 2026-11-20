@@ -399,6 +399,100 @@ export class OrdersService {
     );
   }
 
+  /** Marketplace-wide lookup used only after the controller has verified ADMIN. */
+  private async requireAdminSellerOrderForStatusUpdate(sellerOrderId: string) {
+    const sellerOrder = await this.prisma.sellerOrder.findFirst({
+      where: { id: sellerOrderId },
+      select: { id: true, status: true, orderId: true, sellerId: true },
+    });
+    if (!sellerOrder) {
+      throw new NotFoundException('Seller order not found');
+    }
+    return sellerOrder;
+  }
+
+  /**
+   * Ação de fulfillment do ADMIN, explicitamente limitada a uma etapa para
+   * frente. O UPDATE condicional, histórico e outbox continuam na mesma
+   * transação. Assim nenhuma ação administrativa pode se passar por um
+   * vendedor ou avançar pagamento manualmente.
+   */
+  private async advanceSellerOrderForAdmin(
+    sellerOrderId: string,
+    from: SellerOrderStatus,
+    to: SellerOrderStatus,
+    conflictMessage: string,
+    actorUserId: string,
+  ) {
+    const existing = await this.requireAdminSellerOrderForStatusUpdate(
+      sellerOrderId,
+    );
+    if (existing.status !== from) {
+      throw new ConflictException(conflictMessage);
+    }
+    return this.prisma.$transaction(async (tx) => {
+      const moved = await this.transitions.transitionSellerOrder(
+        tx,
+        {
+          sellerOrderId,
+          orderId: existing.orderId,
+          sellerId: existing.sellerId,
+        },
+        from,
+        to,
+        {
+          source: OrderStatusHistorySource.ADMIN,
+          actorType: OrderStatusHistoryActorType.ADMIN,
+          actorId: actorUserId,
+        },
+      );
+      if (!moved) {
+        throw new ConflictException(conflictMessage);
+      }
+      const updated = await tx.sellerOrder.findFirst({
+        where: { id: sellerOrderId },
+        include: SELLER_ORDER_WITH_ORDER_SUMMARY,
+      });
+      if (!updated) {
+        throw new NotFoundException('Seller order not found');
+      }
+      return updated;
+    });
+  }
+
+  /** ADMIN: CONFIRMED -> PREPARING. */
+  async prepareForAdmin(sellerOrderId: string, actorUserId: string) {
+    return this.advanceSellerOrderForAdmin(
+      sellerOrderId,
+      SellerOrderStatus.CONFIRMED,
+      SellerOrderStatus.PREPARING,
+      'Only CONFIRMED seller orders can start preparing',
+      actorUserId,
+    );
+  }
+
+  /** ADMIN: PREPARING -> SHIPPED. */
+  async shipForAdmin(sellerOrderId: string, actorUserId: string) {
+    return this.advanceSellerOrderForAdmin(
+      sellerOrderId,
+      SellerOrderStatus.PREPARING,
+      SellerOrderStatus.SHIPPED,
+      'Only PREPARING seller orders can be shipped',
+      actorUserId,
+    );
+  }
+
+  /** ADMIN: SHIPPED -> DELIVERED. */
+  async deliverForAdmin(sellerOrderId: string, actorUserId: string) {
+    return this.advanceSellerOrderForAdmin(
+      sellerOrderId,
+      SellerOrderStatus.SHIPPED,
+      SellerOrderStatus.DELIVERED,
+      'Only SHIPPED seller orders can be marked delivered',
+      actorUserId,
+    );
+  }
+
   /**
    * Admin, marketplace-wide: every SellerOrder row, across every store, not
    * just one seller's own. Same shape as listForSeller above (SellerOrder é

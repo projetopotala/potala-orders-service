@@ -767,6 +767,8 @@ enum OrderStatusHistorySource {
   PAYMENT_WEBHOOK
   /// Ação do vendedor sobre o próprio subpedido (fulfillment).
   SELLER
+  /// Ação administrativa de fulfillment, registrada com o usuário administrador.
+  ADMIN
 
   @@schema("orders")
 }
@@ -775,6 +777,7 @@ enum OrderStatusHistorySource {
 enum OrderStatusHistoryActorType {
   CUSTOMER
   SELLER
+  ADMIN
   SYSTEM
 
   @@schema("orders")

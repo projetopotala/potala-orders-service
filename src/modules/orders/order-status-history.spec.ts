@@ -1034,7 +1034,51 @@ describe('F2.2A -- fulfillment do vendedor', () => {
     ).toBe(true);
   });
 
-  it('I/B) pular etapa (CONFIRMED -> SHIPPED) é 409 e não grava nada', async () => {
+  it('I/A) ADMIN avança um subpedido e o histórico/outbox preservam o ator administrativo', async () => {
+    const { db, service, sellerOrderIds } = paidOrder();
+    const adminUserId = '00000000-0000-4000-8000-00000000ad01';
+
+    const updated = await service.prepareForAdmin(
+      sellerOrderIds[1],
+      adminUserId,
+    );
+
+    expect(updated.status).toBe('PREPARING');
+    expect(db.sellerOrders[0].status).toBe('CONFIRMED');
+    expect(db.history).toEqual([
+      expect.objectContaining({
+        sellerOrderId: sellerOrderIds[1],
+        sellerId: SELLER_B,
+        fromStatus: 'CONFIRMED',
+        toStatus: 'PREPARING',
+        source: 'ADMIN',
+        actorType: 'ADMIN',
+        actorId: adminUserId,
+      }),
+    ]);
+    expect(db.outbox).toHaveLength(1);
+    expect(db.outbox[0]).toMatchObject({
+      aggregateType: 'SELLER_ORDER',
+      eventType: 'orders.seller_order.status_changed',
+      statusHistoryId: db.history[0].id,
+      payload: expect.objectContaining({
+        source: 'ADMIN',
+        toStatus: 'PREPARING',
+      }),
+    });
+  });
+
+  it('I/B) ADMIN não pula etapa nem confirma pagamento manualmente', async () => {
+    const { db, service, sellerOrderIds } = paidOrder();
+
+    await expect(
+      service.shipForAdmin(sellerOrderIds[0], 'admin-1'),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(db.sellerOrders[0].status).toBe('CONFIRMED');
+    expect(db.history).toHaveLength(0);
+  });
+
+  it('I/C) vendedor não pula etapa (CONFIRMED -> SHIPPED) e não grava nada', async () => {
     const { db, service, sellerOrderIds } = paidOrder();
 
     await expect(
