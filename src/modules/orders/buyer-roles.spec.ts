@@ -108,6 +108,9 @@ describe('cliente comum não ganha permissão de vendedor/admin', () => {
       ['GET /seller/returns', SellerReturnsController, 'list'],
       ['GET /seller/claims', SellerClaimsController, 'list'],
       ['GET /admin/orders', AdminOrdersController, 'list'],
+      ['PATCH /admin/orders/:id/prepare', AdminOrdersController, 'prepare'],
+      ['PATCH /admin/orders/:id/ship', AdminOrdersController, 'ship'],
+      ['PATCH /admin/orders/:id/deliver', AdminOrdersController, 'deliver'],
       ['GET /admin/returns', AdminReturnsController, 'list'],
       ['GET /admin/claims', AdminClaimsController, 'list'],
     ];
